@@ -1,0 +1,184 @@
+@nix {"action":"msg","column":null,"file":null,"level":1,"line":null,"msg":"\u001b[35;1mwarning:\u001b[0m Nix search path entry '\u001b[35;1m/nix/var/nix/profiles/per-user/root/channels\u001b[0m' does not exist, ignoring","raw_msg":"Nix search path entry '\u001b[35;1m/nix/var/nix/profiles/per-user/root/channels\u001b[0m' does not exist, ignoring"}
+@nix {"action":"start","id":902514362810368,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/stdenv/generic/source-stdenv.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810368}
+@nix {"action":"start","id":902514362810369,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/stdenv/generic/default-builder.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810369}
+@nix {"action":"start","id":902514362810370,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/mescc-tools-extra/build.kaem' to the store","type":0}
+@nix {"action":"stop","id":902514362810370}
+@nix {"action":"start","id":902514362810371,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/stage0-posix/mescc-tools/build.kaem' to the store","type":0}
+@nix {"action":"stop","id":902514362810371}
+@nix {"action":"start","id":902514362810372,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/mes/setjmp_x86_64.c' to the store","type":0}
+@nix {"action":"stop","id":902514362810372}
+@nix {"action":"start","id":902514362810373,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/ln-boot/ln.c' to the store","type":0}
+@nix {"action":"stop","id":902514362810373}
+@nix {"action":"start","id":902514362810374,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/mes/ldexpl.c' to the store","type":0}
+@nix {"action":"stop","id":902514362810374}
+@nix {"action":"start","id":902514362810375,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/0001-No-impure-bin-sh.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810375}
+@nix {"action":"start","id":902514362810376,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/0002-remove-impure-dirs.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810376}
+@nix {"action":"start","id":902514362810377,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/gnumake/0003-tinycc-support.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810377}
+@nix {"action":"start","id":902514362810378,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/gnugrep/main.mk' to the store","type":0}
+@nix {"action":"stop","id":902514362810378}
+@nix {"action":"start","id":902514362810379,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/tinycc/static-link.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810379}
+@nix {"action":"start","id":902514362810380,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/gawk/no-stamp.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810380}
+@nix {"action":"start","id":902514362810381,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/bash/mksignames-flush.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810381}
+@nix {"action":"start","id":902514362810382,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/binutils/deterministic.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810382}
+@nix {"action":"start","id":902514362810383,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/binutils/fix-tinycc-attribute.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810383}
+@nix {"action":"start","id":902514362810384,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/gcc/no-system-headers.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810384}
+@nix {"action":"start","id":902514362810385,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/minimal-bootstrap/python/no-ldconfig.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810385}
+@nix {"action":"start","id":902514362810386,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/stdenv/generic/builder.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810386}
+@nix {"action":"start","id":902514362810387,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/no-broken-symlinks.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810387}
+@nix {"action":"start","id":902514362810388,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/audit-tmpdir.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810388}
+@nix {"action":"start","id":902514362810389,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/compress-man-pages.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810389}
+@nix {"action":"start","id":902514362810390,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/make-symlinks-relative.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810390}
+@nix {"action":"start","id":902514362810391,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/move-docs.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810391}
+@nix {"action":"start","id":902514362810392,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/move-lib64.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810392}
+@nix {"action":"start","id":902514362810393,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/move-sbin.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810393}
+@nix {"action":"start","id":902514362810394,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/move-systemd-user-units.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810394}
+@nix {"action":"start","id":902514362810395,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/multiple-outputs.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810395}
+@nix {"action":"start","id":902514362810396,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/patch-shebangs.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810396}
+@nix {"action":"start","id":902514362810397,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/prune-libtool-files.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810397}
+@nix {"action":"start","id":902514362810398,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/reproducible-builds.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810398}
+@nix {"action":"start","id":902514362810399,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/set-source-date-epoch-to-latest.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810399}
+@nix {"action":"start","id":902514362810400,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/strip.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810400}
+@nix {"action":"start","id":902514362810401,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/stdenv/generic/setup.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810401}
+@nix {"action":"start","id":902514362810402,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/zlib/export-variable.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810402}
+@nix {"action":"start","id":902514362810403,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/update-autotools-gnu-config-scripts.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810403}
+@nix {"action":"start","id":902514362810404,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/bintools-wrapper/ld-wrapper.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810404}
+@nix {"action":"start","id":902514362810405,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/bintools-wrapper/add-flags.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810405}
+@nix {"action":"start","id":902514362810406,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/bintools-wrapper/add-hardening.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810406}
+@nix {"action":"start","id":902514362810407,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/wrapper-common/utils.bash' to the store","type":0}
+@nix {"action":"stop","id":902514362810407}
+@nix {"action":"start","id":902514362810408,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/wrapper-common/darwin-sdk-setup.bash' to the store","type":0}
+@nix {"action":"stop","id":902514362810408}
+@nix {"action":"start","id":902514362810409,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/role.bash' to the store","type":0}
+@nix {"action":"stop","id":902514362810409}
+@nix {"action":"start","id":902514362810410,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/bintools-wrapper/setup-hook.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810410}
+@nix {"action":"start","id":902514362810411,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/cc-wrapper/add-flags.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810411}
+@nix {"action":"start","id":902514362810412,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/cc-wrapper/add-hardening.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810412}
+@nix {"action":"start","id":902514362810413,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/cc-wrapper/setup-hook.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810413}
+@nix {"action":"start","id":902514362810414,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/cc-wrapper/cc-wrapper.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810414}
+@nix {"action":"start","id":902514362810415,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/perl/no-sys-dirs.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810415}
+@nix {"action":"start","id":902514362810416,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/perl/CVE-2026-15534-1.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810416}
+@nix {"action":"start","id":902514362810417,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/perl/CVE-2026-15534-2.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810417}
+@nix {"action":"start","id":902514362810418,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/perl/setup-hook.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810418}
+@nix {"action":"start","id":902514362810419,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/setup-hooks/separate-debug-info.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810419}
+@nix {"action":"start","id":902514362810420,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/shells/bash/pgrp-pipe-5.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810420}
+@nix {"action":"start","id":902514362810421,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/gettext/absolute-paths.diff' to the store","type":0}
+@nix {"action":"stop","id":902514362810421}
+@nix {"action":"start","id":902514362810422,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/gettext/0001-msginit-Do-not-use-POT-Creation-Date.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810422}
+@nix {"action":"start","id":902514362810423,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/gettext/gettext-setup-hook.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810423}
+@nix {"action":"start","id":902514362810424,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/by-name/ex/expand-response-params/expand-response-params.c' to the store","type":0}
+@nix {"action":"stop","id":902514362810424}
+@nix {"action":"start","id":902514362810425,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/deterministic.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810425}
+@nix {"action":"start","id":902514362810426,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/0001-Revert-libtool.m4-fix-the-NM-nm-over-here-B-option-w.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810426}
+@nix {"action":"start","id":902514362810427,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/0001-Revert-libtool.m4-fix-nm-BSD-flag-detection.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810427}
+@nix {"action":"start","id":902514362810428,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/always-search-rpath.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810428}
+@nix {"action":"start","id":902514362810429,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/plugins-no-BINDIR.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810429}
+@nix {"action":"start","id":902514362810430,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/0001-libtool.m4-update-macos-version-detection-block.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810430}
+@nix {"action":"start","id":902514362810431,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/avr-size.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810431}
+@nix {"action":"start","id":902514362810432,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/binutils/windres-locate-gcc.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810432}
+@nix {"action":"start","id":902514362810433,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/bintools-wrapper/gnu-binutils-strip-wrapper.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810433}
+@nix {"action":"start","id":902514362810434,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/libxcrypt/fix-symver-on-non-elf.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810434}
+@nix {"action":"start","id":902514362810435,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/tools/misc/patchelf/setup-hook.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810435}
+@nix {"action":"start","id":902514362810436,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/by-name/wh/which/gcc15.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810436}
+@nix {"action":"start","id":902514362810437,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/compilers/gcc/patches/gcc-12-no-sys-dirs.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810437}
+@nix {"action":"start","id":902514362810438,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/compilers/gcc/patches/13/no-sys-dirs-riscv.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810438}
+@nix {"action":"start","id":902514362810439,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/compilers/gcc/patches/13/mangle-NIX_STORE-in-__FILE__.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810439}
+@nix {"action":"start","id":902514362810440,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/compilers/gcc/patches/ppc-musl.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810440}
+@nix {"action":"start","id":902514362810441,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/compilers/gcc/patches/cfi_startproc-reorder-label-14-1.diff' to the store","type":0}
+@nix {"action":"stop","id":902514362810441}
+@nix {"action":"start","id":902514362810442,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/compilers/gcc/patches/c++tools-dont-check-enable-default-pie.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810442}
+@nix {"action":"start","id":902514362810443,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/build-support/nuke-references/nuke-refs' to the store","type":0}
+@nix {"action":"stop","id":902514362810443}
+@nix {"action":"start","id":902514362810444,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/os-specific/linux/kernel-headers/no-relocs.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810444}
+@nix {"action":"start","id":902514362810445,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/python/cpython/3.13/no-ldconfig.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810445}
+@nix {"action":"start","id":902514362810446,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/python/cpython/3.13/virtualenv-permissions.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810446}
+@nix {"action":"start","id":902514362810447,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/interpreters/python/setup-hook.sh' to the store","type":0}
+@nix {"action":"stop","id":902514362810447}
+@nix {"action":"start","id":902514362810448,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/2.42-master.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810448}
+@nix {"action":"start","id":902514362810449,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/nix-locale-archive.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810449}
+@nix {"action":"start","id":902514362810450,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/dont-use-system-ld-so-cache.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810450}
+@nix {"action":"start","id":902514362810451,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/dont-use-system-ld-so-preload.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810451}
+@nix {"action":"start","id":902514362810452,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/fix_path_attribute_in_getconf.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810452}
+@nix {"action":"start","id":902514362810453,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/fix-x64-abi.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810453}
+@nix {"action":"start","id":902514362810454,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/nix-nss-open-files.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810454}
+@nix {"action":"start","id":902514362810455,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/0001-Revert-Remove-all-usage-of-BASH-or-BASH-in-installed.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810455}
+@nix {"action":"start","id":902514362810456,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/reenable_DT_HASH.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810456}
+@nix {"action":"start","id":902514362810457,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/0001-localedata-allow-reproducible-parallel-install-of-lo.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810457}
+@nix {"action":"start","id":902514362810458,"level":5,"parent":0,"text":"copying '/nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source/pkgs/development/libraries/glibc/0002-Makeconfig-make-inst_complocaledir-overridable.patch' to the store","type":0}
+@nix {"action":"stop","id":902514362810458}
+@nix {"action":"msg","column":1,"file":"«string»:1:1","level":0,"line":1,"msg":"\u001b[31;1merror:\u001b[0m attribute '\u001b[35;1mnodejs_18\u001b[0m' missing\n       \u001b[34;1mat \u001b[35;1m«string»:1:1\u001b[0m:\n            1| (import /nix/store/3kdyk85p180ya894a4qnq41h8hb5b2ig-source { system = \"x86_64-linux\"; }).nodejs_18\n             | \u001b[31;1m^\u001b[0m\n       Did you mean one of \u001b[35;1mnodejs_20\u001b[0m, \u001b[35;1mnodejs_22\u001b[0m, \u001b[35;1mnodejs_24\u001b[0m, \u001b[35;1mnodejs_25\u001b[0m or \u001b[35;1mnodejs_26\u001b[0m?","raw_msg":"attribute '\u001b[35;1mnodejs_18\u001b[0m' missing"}
