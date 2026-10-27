@@ -1,0 +1,86 @@
+use anyhow::{Context, Result, bail};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+pub struct Git {
+    dir: PathBuf,
+}
+
+impl Git {
+    /// The work tree at `dir`, if it is one.
+    pub fn open(dir: &Path) -> Option<Self> {
+        let git = Self { dir: dir.to_path_buf() };
+        git.quiet(&["rev-parse", "--is-inside-work-tree"]).then_some(git)
+    }
+
+    fn command(&self) -> Command {
+        let mut c = Command::new("git");
+        c.arg("-C").arg(&self.dir).stdin(Stdio::null());
+        c
+    }
+
+    fn quiet(&self, args: &[&str]) -> bool {
+        self.command()
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    pub fn tracked(&self, path: &Path) -> bool {
+        self.command()
+            .args(["ls-files", "--error-unmatch", "--"])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Flakes ignore untracked files; --intent-to-add makes the file and its
+    /// later edits visible without staging any content.
+    pub fn intent_to_add(&self, path: &Path) -> Result<()> {
+        let status = self
+            .command()
+            .args(["add", "--intent-to-add", "--"])
+            .arg(path)
+            .status()
+            .context("spawning git add")?;
+        if !status.success() {
+            bail!("git add --intent-to-add {} failed", path.display());
+        }
+        Ok(())
+    }
+
+    pub fn changed(&self, paths: &[&Path]) -> Result<bool> {
+        let out = self
+            .command()
+            .args(["status", "--porcelain", "--"])
+            .args(paths)
+            .output()
+            .context("spawning git status")?;
+        if !out.status.success() {
+            bail!("git status failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(!out.stdout.is_empty())
+    }
+
+    /// Commit exactly `paths`, leaving everything else in the tree alone.
+    /// Returns false when there was nothing to commit.
+    pub fn commit(&self, paths: &[&Path], message: &str) -> Result<bool> {
+        if !self.changed(paths)? {
+            return Ok(false);
+        }
+        let out = self
+            .command()
+            .args(["commit", "-q", "-m", message, "--"])
+            .args(paths)
+            .output()
+            .context("spawning git commit")?;
+        if !out.status.success() {
+            bail!("git commit failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(true)
+    }
+}

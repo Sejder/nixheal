@@ -22,6 +22,31 @@ impl Lock {
         Ok(Self { bytes, json })
     }
 
+    pub fn from_json(json: &Value) -> Result<Self> {
+        let mut bytes = serde_json::to_vec_pretty(json)?;
+        bytes.push(b'\n');
+        Self::from_bytes(bytes)
+    }
+
+    pub fn json(&self) -> &Value {
+        &self.json
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The newest `lastModified` of any locked input: how recent this lock is.
+    pub fn last_modified(&self) -> i64 {
+        self.json["nodes"]
+            .as_object()
+            .into_iter()
+            .flat_map(|nodes| nodes.values())
+            .filter_map(|n| n["locked"]["lastModified"].as_i64())
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn sha256(&self) -> String {
         Sha256::digest(&self.bytes)
             .iter()
@@ -96,6 +121,22 @@ mod tests {
     fn missing_input() {
         assert!(lock().locked("nope").is_none());
         assert!(lock().locked("home-manager").is_none());
+    }
+
+    #[test]
+    fn last_modified_is_the_newest_node() {
+        let l = Lock::from_bytes(
+            br#"{"nodes":{"a":{"locked":{"lastModified":5}},"b":{"locked":{"lastModified":9}},"root":{}}}"#.to_vec(),
+        )
+        .unwrap();
+        assert_eq!(l.last_modified(), 9);
+        assert_eq!(lock().last_modified(), 0);
+    }
+
+    #[test]
+    fn from_json_round_trips() {
+        let l = Lock::from_json(lock().json()).unwrap();
+        assert_eq!(l.nar_hash("nixpkgs").as_deref(), Some("sha256-A"));
     }
 
     #[test]

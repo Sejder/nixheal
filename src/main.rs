@@ -1,20 +1,22 @@
+mod cmd;
+mod config;
 mod date;
-mod failures;
+mod engine;
+mod git;
 mod graph;
 mod lock;
+mod log;
 mod logparse;
 mod nix;
+mod pins;
 mod resolve;
-mod run;
+mod state;
 
-use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use failures::Failures;
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Keep failing packages at their last good nixpkgs so the rest of the system
-/// keeps updating, and drop each pin once the package builds again.
+/// Update a flake and keep it building: packages that fail are pinned to the
+/// nixpkgs they last built with, and unpinned once they build again.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -24,62 +26,59 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Build the outputs, pinning what fails and unpinning what builds again.
-    Run(run::Args),
-    /// List the current pins.
-    Status {
-        #[arg(long, default_value = "failures.json")]
-        failures: PathBuf,
+    /// Update the flake inputs, pin and unpin, commit, then switch with nh.
+    Update {
+        #[command(flatten)]
+        build: cmd::Build,
+        /// Inputs to update; all of them when none are named.
+        inputs: Vec<String>,
     },
-    /// Remove a pin by hand.
-    Clear {
-        #[arg(long, default_value = "failures.json")]
-        failures: PathBuf,
-        input: String,
+    /// Pin and unpin against the current lock, commit, then switch with nh.
+    Switch {
+        #[command(flatten)]
+        build: cmd::Build,
+    },
+    /// List the pins and held hosts.
+    Status {
+        #[command(flatten)]
+        at: cmd::Where,
+    },
+    /// Show why a package is pinned: the failed drv, the path up to the
+    /// package, and the end of the build log.
+    Why {
+        #[command(flatten)]
+        pick: cmd::Pick,
         attr: String,
     },
-}
-
-fn status(path: &Path) -> Result<ExitCode> {
-    let state = Failures::load(path)?;
-    if state.len() == 0 {
-        println!("no pins");
-        return Ok(ExitCode::SUCCESS);
-    }
-    let today = date::today();
-    for (input, attr, pin) in state.iter() {
-        let age = date::parse(&pin.since)
-            .map(|d| format!("{}d", today - d))
-            .unwrap_or_else(|| "?".into());
-        let reason = match pin.reason {
-            failures::Reason::Build => "build",
-            failures::Reason::Eval => "eval",
-        };
-        println!(
-            "{input}.{attr}\tsince {} ({age})\t{reason}\t{}",
-            pin.since,
-            pin.failed_drv.as_deref().unwrap_or("-")
-        );
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
-fn clear(path: &Path, input: &str, attr: &str) -> Result<ExitCode> {
-    let mut state = Failures::load(path)?;
-    if state.remove(input, attr).is_none() {
-        bail!("{input}.{attr} is not pinned");
-    }
-    state.save(path)?;
-    println!("cleared {input}.{attr}");
-    Ok(ExitCode::SUCCESS)
+    /// Pin a package by hand at the current lock; it stays until cleared.
+    Pin {
+        #[command(flatten)]
+        pick: cmd::Pick,
+        attr: String,
+        #[arg(long, default_value = "nixpkgs")]
+        input: String,
+    },
+    /// Remove a pin, or release a held host with --held.
+    Clear {
+        #[command(flatten)]
+        pick: cmd::Pick,
+        attr: Option<String>,
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long)]
+        held: bool,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::Run(args) => run::run(args),
-        Command::Status { failures } => status(failures),
-        Command::Clear { failures, input, attr } => clear(failures, input, attr),
+        Command::Update { build, inputs } => cmd::reconcile(build, Some(inputs)),
+        Command::Switch { build } => cmd::reconcile(build, None),
+        Command::Status { at } => cmd::status(at),
+        Command::Why { pick, attr } => cmd::why(pick, attr),
+        Command::Pin { pick, attr, input } => cmd::pin(pick, attr, input),
+        Command::Clear { pick, attr, input, held } => cmd::clear(pick, attr.as_deref(), input.as_deref(), *held),
     };
     result.unwrap_or_else(|e| {
         eprintln!("autopin: error: {e:#}");

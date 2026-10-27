@@ -14,6 +14,8 @@
     in
     {
       lib.mkOverlay = import ./nix/overlay.nix;
+      nixosModules.default = import ./nix/module.nix self;
+      homeManagerModules.default = import ./nix/hm-module.nix self;
 
       packages = forAllSystems (
         system:
@@ -44,14 +46,17 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           locked = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked;
-          failures = builtins.toFile "failures.json" (
+          pin = {
+            inherit locked;
+            since = "2026-01-01";
+            reason = "build";
+            checkedNarHash = "";
+          };
+          pins = builtins.toFile "pins.json" (
             builtins.toJSON {
-              pins.nixpkgs.hello = {
-                inherit locked;
-                since = "2026-01-01";
-                reason = "build";
-                checkedNarHash = "";
-              };
+              version = 2;
+              hosts.test.pins.nixpkgs.hello = pin;
+              homes.mikke.pins.nixpkgs.cowsay = pin;
             }
           );
           prev = {
@@ -60,27 +65,76 @@
             hello = "new";
             cowsay = "new";
           };
-          pinned = self.lib.mkOverlay {
-            inherit failures;
-            input = "nixpkgs";
-          } prev prev;
-          other = self.lib.mkOverlay {
-            inherit failures;
-            input = "nixpkgs-unstable";
-          } prev prev;
-          missing = self.lib.mkOverlay {
-            failures = ./does-not-exist.json;
-            input = "nixpkgs";
-          } prev prev;
+          overlay =
+            args:
+            self.lib.mkOverlay (
+              {
+                inherit pins;
+                name = "test";
+                input = "nixpkgs";
+              }
+              // args
+            ) prev prev;
+
+          machine = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.default
+              {
+                networking.hostName = "test";
+                programs.autopin = {
+                  enable = true;
+                  pinsFile = pins;
+                  hosts = [ "test" ];
+                  nixpkgs.extra = {
+                    source = nixpkgs;
+                    argName = "extra-pkgs";
+                  };
+                };
+                nixpkgs.overlays = [
+                  (final: prev: {
+                    hello = prev.hello.overrideAttrs { pname = "hello-local"; };
+                    cowsay = prev.cowsay.overrideAttrs { pname = "cowsay-local"; };
+                  })
+                ];
+                boot.loader.grub.enable = false;
+                fileSystems."/" = {
+                  device = "none";
+                  fsType = "tmpfs";
+                };
+                system.stateVersion = nixpkgs.lib.trivial.release;
+              }
+              (
+                { extra-pkgs, ... }:
+                {
+                  environment.etc."extra-hello".text = extra-pkgs.hello.pname;
+                }
+              )
+            ];
+          };
+          settings = builtins.fromJSON machine.config.environment.etc."autopin.json".text;
         in
         {
           package = self.packages.${system}.default;
           overlay =
-            assert pinned.hello.drvPath == pkgs.hello.drvPath;
-            assert !(pinned ? cowsay);
-            assert other == { };
-            assert missing == { };
+            assert (overlay { }).hello.drvPath == pkgs.hello.drvPath;
+            assert !((overlay { }) ? cowsay);
+            assert overlay { input = "nixpkgs-unstable"; } == { };
+            assert overlay { name = "other"; } == { };
+            assert (overlay { kind = "homes"; name = "mikke"; }) ? cowsay;
+            assert overlay { pins = ./does-not-exist.json; } == { };
+            assert overlay { pins = null; } == { };
             pkgs.runCommand "autopin-overlay-check" { } "touch $out";
+          module =
+            assert machine.pkgs.hello.pname == "hello";
+            assert machine.pkgs.cowsay.pname == "cowsay-local";
+            assert machine.config.programs.autopin.packageSets ? extra;
+            assert machine.config.environment.etc."extra-hello".text == "hello";
+            assert settings.self == "test";
+            assert settings.kind == "nixos";
+            assert settings.inputs == [ "extra" "nixpkgs" ];
+            assert builtins.elem machine.config.programs.autopin.package machine.config.environment.systemPackages;
+            pkgs.runCommand "autopin-module-check" { } "touch $out";
         }
       );
     };

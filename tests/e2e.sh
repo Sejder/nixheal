@@ -1,24 +1,37 @@
 #!/usr/bin/env bash
 # End-to-end run of autopin against a toy nixpkgs whose history breaks and then
-# fixes packages. Needs a working nix with flakes; run from anywhere:
+# fixes packages, on two toy hosts: a (the machine autopin runs on) and b.
+# Needs a working nix with flakes; run from anywhere:
 #
 #   cargo build && tests/e2e.sh
 #
-# AUTOPIN overrides the binary under test.
+# AUTOPIN overrides the binary under test. nh is replaced by a stub that
+# records its arguments.
 
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 autopin="${AUTOPIN:-$repo/target/debug/autopin}"
-system="$(nix eval --raw --impure --expr builtins.currentSystem)"
 nix() { command nix --extra-experimental-features "nix-command flakes" "$@"; }
+system="$(nix eval --raw --impure --expr builtins.currentSystem)"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 toy="$work/toypkgs"
 sys="$work/system"
 log="$work/log"
+calls="$work/nh.calls"
+config="$work/autopin.json"
 salt="$(date +%s%N)"
+
+export XDG_STATE_HOME="$work/state"
+export GIT_AUTHOR_NAME=e2e GIT_AUTHOR_EMAIL=e2e@localhost
+export GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e2e@localhost
+mkdir -p "$work/bin"
+printf '#!/bin/sh\necho "$*" >> %s\n' "$calls" >"$work/bin/nh"
+chmod +x "$work/bin/nh"
+export PATH="$work/bin:$PATH"
+touch "$calls"
 
 step() { printf '\n=== %s\n' "$*"; }
 fail() {
@@ -27,66 +40,66 @@ fail() {
   exit 1
 }
 
-pins() {
+jq_pins() {
   nix eval --raw --impure --expr "
-    let f = builtins.fromJSON (builtins.readFile $sys/failures.json); in
-    builtins.concatStringsSep \" \" (builtins.concatLists (builtins.attrValues
-      (builtins.mapAttrs (i: s: map (a: i + \".\" + a) (builtins.attrNames s)) (f.pins or { }))))"
+    let f = builtins.fromJSON (builtins.readFile $sys/pins.json); in $1"
 }
 
-field() {
-  nix eval --raw --impure --expr "
-    let f = builtins.fromJSON (builtins.readFile $sys/failures.json); in
-    toString (f.pins.$1.$2.$3 or \"\")"
+pins_of() {
+  jq_pins "builtins.concatStringsSep \" \" (builtins.concatLists (builtins.attrValues
+    (builtins.mapAttrs (i: s: map (a: i + \".\" + a) (builtins.attrNames s)) ((f.hosts.$1 or { }).pins or { }))))"
 }
+
+field() { jq_pins "toString (f.hosts.$1.pins.$2.$3.$4 or \"\")"; }
+held_reason() { jq_pins "(f.hosts.$1.held or { }).reason or \"\""; }
 
 expect_pins() {
   local got
-  got="$(pins)"
-  [ "$got" = "$1" ] || fail "expected pins [$1], got [$got]"
-  echo "pins: [${got}]"
+  got="$(pins_of "$1")"
+  [ "$got" = "$2" ] || fail "expected pins on $1 [$2], got [$got]"
+  echo "pins on $1: [$got]"
 }
 
-expect_log() {
-  grep -qF -- "$1" "$log" || fail "log lacks: $1"
-}
-
-reject_log() {
-  if grep -qF -- "$1" "$log"; then fail "log unexpectedly has: $1"; fi
-}
+expect_log() { grep -qF -- "$1" "$log" || fail "log lacks: $1"; }
+reject_log() { if grep -qF -- "$1" "$log"; then fail "log unexpectedly has: $1"; fi; }
+commits() { git -C "$sys" rev-list --count HEAD; }
+nh_calls() { wc -l <"$calls" | tr -d ' '; }
 
 expect_built() {
   local out
-  out="$(nix build --no-link --print-out-paths "$sys#toplevel")"
-  grep -qF -- "$1" "$out" || fail "toplevel does not contain $1: $(cat "$out")"
+  out="$(nix build --no-link --print-out-paths "$sys#nixosConfigurations.$1.config.system.build.toplevel")"
+  grep -qF -- "$2" "$out" || fail "$1 does not contain $2: $(head -c 300 "$out")"
+}
+
+write_config() {
+  cat >"$config" <<EOF
+{ "kind": "nixos", "self": "a", "flake": "$sys", "hosts": ["a", "b"], "homes": [],
+  "inputs": ["toypkgs"], "warnAfterDays": 14, "deny": [$1] }
+EOF
+}
+
+autopin_() {
+  set +e
+  "$autopin" "$@" --config "$config" >"$work/stdout" 2>"$log"
+  local rc=$?
+  set -e
+  cat "$work/stdout" >>"$log"
+  grep -h 'autopin:' "$log" | sed 's/^/  | /' || true
+  return $rc
 }
 
 revision() {
-  local libfoo="$1" gone="$2" hello="$3"
   cat >"$toy/state.nix" <<EOF
-{ libfoo = "$libfoo"; goneRemoved = $gone; hello = "$hello"; salt = "$salt"; }
+{ libfoo = "$1"; goneRemoved = $2; hello = "$3"; linux = "$4"; salt = "$salt"; }
 EOF
   git -C "$toy" add -A
-  git -C "$toy" -c user.name=e2e -c user.email=e2e@localhost commit -qm "libfoo=$libfoo gone-removed=$gone hello=$hello"
-}
-
-publish() { cp "$sys/flake.lock" "$work/published.lock"; }
-
-run_autopin() {
-  set +e
-  "$autopin" run --flake "$sys" --old-lock "$work/published.lock" \
-    --output machine=toplevel --pkgs toypkgs=pkgs --system "$system" "$@" 2>"$log"
-  local rc=$?
-  set -e
-  sed 's/^/  | /' "$log" | grep 'autopin:' || true
-  return $rc
+  git -C "$toy" commit -qm "libfoo=$1 gone-removed=$2 hello=$3 linux=$4"
 }
 
 [ -x "$autopin" ] || fail "$autopin is not built; run cargo build first"
 
 mkdir -p "$toy" "$sys"
 git -C "$toy" init -q -b main
-
 cat >"$toy/default.nix" <<'EOF'
 { system, config ? { }, overlays ? [ ] }:
 let
@@ -97,15 +110,20 @@ let
     builder = "/bin/sh";
     args = [ "-c" script ];
   };
+  broken = what: "echo ${what} does not compile >&2; exit 1";
   base = self: {
     inherit config;
     stdenv.hostPlatform.system = system;
     libfoo = mk "libfoo-1.0" "libfoo" [ ] (
-      if state.libfoo == "broken" then "echo libfoo does not compile >&2; exit 1"
-      else "echo libfoo-${state.libfoo} > $out"
+      if state.libfoo == "broken" then broken "libfoo" else "echo libfoo-${state.libfoo} > $out"
     );
     app = mk "app-2.0" "app" [ self.libfoo ] "echo app $deps > $out";
-    hello = mk "hello-${state.hello}" "hello" [ ] "echo hello > $out";
+    hello = mk "hello-${state.hello}" "hello" [ ] (
+      if state.hello == "broken" then broken "hello" else "echo hello > $out"
+    );
+    linux = mk "linux-6.0" "linux" [ ] (
+      if state.linux == "broken" then broken "linux" else "echo linux-${state.linux} > $out"
+    );
     gone = if state.goneRemoved then throw "'gone' has been removed" else mk "gone-1.0" "gone" [ ] "echo gone > $out";
   };
   extend = f: o: self: let prev = f self; in prev // o self prev;
@@ -121,93 +139,148 @@ cat >"$sys/flake.nix" <<EOF
   outputs = { self, toypkgs }:
     let
       system = "$system";
-      pkgs = import toypkgs {
-        inherit system;
-        overlays = [ (import ./overlay.nix { failures = ./failures.json; input = "toypkgs"; }) ];
-      };
-      systemPath = derivation {
-        name = "system-path";
-        inherit system;
-        builder = "/bin/sh";
-        args = [ "-c" "echo \$paths > \$out" ];
-        paths = [ pkgs.app pkgs.hello pkgs.gone ];
-      };
+      mkHost = name: paths:
+        let
+          pkgs = import toypkgs {
+            inherit system;
+            overlays = [ (import ./overlay.nix { pins = ./pins.json; inherit name; input = "toypkgs"; }) ];
+          };
+          sp = derivation {
+            name = "system-path-\${name}";
+            inherit system;
+            builder = "/bin/sh";
+            args = [ "-c" "echo \$paths > \$out" ];
+            paths = paths pkgs;
+          };
+        in {
+          config.programs.autopin.packageSets.toypkgs = pkgs;
+          config.system.build.toplevel = derivation {
+            name = "toplevel-\${name}";
+            inherit system;
+            builder = "/bin/sh";
+            args = [ "-c" "read -r line < \$sp; echo \"\$line\" > \$out" ];
+            inherit sp;
+          };
+        };
     in {
-      inherit pkgs;
-      toplevel = derivation {
-        name = "toplevel";
-        inherit system;
-        builder = "/bin/sh";
-        args = [ "-c" "read -r line < \$sp; echo \"\$line\" > \$out" ];
-        sp = systemPath;
-      };
+      nixosConfigurations.a = mkHost "a" (p: [ p.hello p.gone ]);
+      nixosConfigurations.b = mkHost "b" (p: [ p.app p.hello p.linux ]);
     };
 }
 EOF
+write_config ""
 
 git -C "$sys" init -q -b main
 git -C "$sys" add flake.nix overlay.nix
-git -C "$sys" -c user.name=e2e -c user.email=e2e@localhost commit -qm system
-
-step "r1: everything builds, autopin creates failures.json and git-adds it"
-revision ok false 1
+revision ok false 1 ok
 nix flake lock "$sys"
 git -C "$sys" add flake.lock
-publish
-[ ! -e "$sys/failures.json" ] || fail "failures.json should not exist yet"
-run_autopin || fail "autopin gave up on r1"
-expect_log "created $sys/failures.json"
-expect_log "added $sys/failures.json to the git index"
-git -C "$sys" ls-files --error-unmatch failures.json >/dev/null || fail "failures.json is not tracked"
-expect_pins ""
-expect_built hello-1
+git -C "$sys" commit -qm system
 
-step "r2: libfoo breaks (build) and gone is removed (eval)"
-revision broken true 2
-nix flake update --flake "$sys"
-run_autopin || fail "autopin gave up on r2"
-expect_pins "toypkgs.app toypkgs.gone"
-[ "$(field toypkgs app reason)" = build ] || fail "app should be a build pin"
-[ "$(field toypkgs gone reason)" = eval ] || fail "gone should be an eval pin"
-case "$(field toypkgs app failedDrv)" in *-libfoo-1.0.drv) ;; *) fail "app should name libfoo as the failed drv" ;; esac
-expect_log "pinned toypkgs.gone"
-expect_log "pinned toypkgs.app"
-expect_built hello-2
-since_gone="$(field toypkgs gone since)"
-publish
+step "r1: everything builds; update creates pins.json, commits it and switches a"
+autopin_ update || fail "autopin update gave up on r1"
+expect_log "created $sys/pins.json"
+git -C "$sys" ls-files --error-unmatch pins.json >/dev/null || fail "pins.json is not tracked"
+git -C "$sys" diff --quiet HEAD -- pins.json || fail "pins.json is not committed"
+[ "$(tail -n1 "$calls")" = "os switch $sys -H a" ] || fail "nh not called for a: $(cat "$calls")"
+expect_pins a ""
+expect_pins b ""
 
-step "r2 again: the input did not move, so nothing is retried"
-run_autopin || fail "autopin gave up on the r2 rerun"
+step "r2: libfoo breaks (only b uses app) and gone is removed (only a uses it)"
+revision broken true 2 ok
+before_calls="$(nh_calls)"
+autopin_ update || fail "autopin update gave up on r2"
+expect_pins a "toypkgs.gone"
+expect_pins b "toypkgs.app"
+[ "$(field a toypkgs gone reason)" = eval ] || fail "gone on a should be an eval pin"
+[ "$(field b toypkgs app reason)" = build ] || fail "app on b should be a build pin"
+git -C "$sys" log -1 --format=%B | grep -qF "pinned host b: toypkgs.app" || fail "commit message lacks the b pin"
+git -C "$sys" log -1 --format=%B | grep -qF "pinned host a: toypkgs.gone" || fail "commit message lacks the a pin"
+[ "$(nh_calls)" -gt "$before_calls" ] || fail "nh was not called on r2"
+expect_built a hello-2
+expect_built b hello-2
+since_gone="$(field a toypkgs gone since)"
+
+step "why: explain the app pin on b"
+autopin_ why app --host b || fail "autopin why failed"
+expect_log "-libfoo-1.0.drv"
+expect_log "trail:    libfoo-1.0 -> app-2.0"
+expect_log "libfoo does not compile"
+
+step "r2 switch: no update, so nothing is retried and nothing is committed"
+before_commits="$(commits)"
+autopin_ switch || fail "autopin switch gave up on r2"
 reject_log "retrying"
-expect_pins "toypkgs.app toypkgs.gone"
+[ "$(commits)" = "$before_commits" ] || fail "switch committed without changes"
+[ "$(tail -n1 "$calls")" = "os switch $sys -H a" ] || fail "switch did not call nh"
 
 step "r3: libfoo is fixed, gone is still removed"
-revision fixed true 3
-nix flake update --flake "$sys"
-run_autopin || fail "autopin gave up on r3"
-expect_log "retrying toypkgs.app"
-expect_log "unpinned toypkgs.app: builds again"
-expect_log "still failing toypkgs.gone"
-expect_pins "toypkgs.gone"
-[ "$(field toypkgs gone since)" = "$since_gone" ] || fail "gone lost its original date"
-expect_built hello-3
-publish
+revision fixed true 3 ok
+autopin_ update || fail "autopin update gave up on r3"
+expect_log "unpinned host b: toypkgs.app: builds again"
+expect_log "still failing host a: toypkgs.gone"
+expect_pins a "toypkgs.gone"
+expect_pins b ""
+[ "$(field a toypkgs gone since)" = "$since_gone" ] || fail "gone lost its original date"
+r3_lock="$work/r3.lock"
+cp "$sys/flake.lock" "$r3_lock"
 
-step "r4: gone is back, every pin clears"
-revision fixed false 4
-nix flake update --flake "$sys"
-run_autopin || fail "autopin gave up on r4"
-expect_log "unpinned toypkgs.gone: builds again"
-expect_pins ""
-expect_built hello-4
-publish
+step "r4: linux breaks on b (denylisted): b is held on the r3 lock, a moves on"
+revision fixed true 4 broken
+autopin_ update || fail "autopin update gave up on r4"
+expect_log "held host b on its last good lock"
+case "$(held_reason b)" in *"linux fails but is never pinned"*) ;; *) fail "b should be held for linux: $(held_reason b)" ;; esac
+held_rev="$(jq_pins 'f.hosts.b.held.lock.nodes.toypkgs.locked.rev')"
+r3_rev="$(nix eval --raw --impure --expr "(builtins.fromJSON (builtins.readFile $r3_lock)).nodes.toypkgs.locked.rev")"
+[ "$held_rev" = "$r3_rev" ] || fail "b is held on $held_rev, expected the r3 lock $r3_rev"
+expect_built a hello-4
+autopin_ status || fail "autopin status failed"
+expect_log "host b	HELD since"
 
-step "r5: libfoo breaks again but app is denylisted, so autopin gives up"
-revision broken false 5
-nix flake update --flake "$sys"
-cp "$sys/failures.json" "$work/before.json"
-if run_autopin --deny app; then fail "autopin should have given up on r5"; fi
-expect_log "giving up: toypkgs.app fails but is never pinned"
-cmp -s "$sys/failures.json" "$work/before.json" || fail "failures.json changed on give-up"
+step "r5: linux is fixed and gone is back: b is released, a unpins"
+revision fixed false 5 ok
+autopin_ update || fail "autopin update gave up on r5"
+expect_log "released host b"
+expect_log "unpinned host a: toypkgs.gone: builds again"
+expect_pins a ""
+expect_pins b ""
+[ -z "$(held_reason b)" ] || fail "b is still held"
+
+step "r6: hello breaks on a, the local host, and is denylisted: nothing changes"
+write_config '"hello"'
+revision fixed false broken ok
+cp "$sys/flake.lock" "$work/before.lock"
+cp "$sys/pins.json" "$work/before.json"
+before_commits="$(commits)"
+before_calls="$(nh_calls)"
+if autopin_ update; then fail "autopin update should have given up on r6"; fi
+expect_log "giving up on host a"
+expect_log "restored flake.lock and pins.json"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored"
+cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored"
+[ "$(commits)" = "$before_commits" ] || fail "a failed update committed"
+[ "$(nh_calls)" = "$before_calls" ] || fail "a failed update switched"
+write_config ""
+
+step "r6 dry run: shows the hello pins, writes nothing"
+autopin_ update --dry-run || fail "the dry run gave up"
+expect_log "dry run: would have pinned host a: toypkgs.hello"
+expect_log "dry run: would have pinned host b: toypkgs.hello"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "the dry run changed flake.lock"
+cmp -s "$sys/pins.json" "$work/before.json" || fail "the dry run changed pins.json"
+[ "$(commits)" = "$before_commits" ] || fail "the dry run committed"
+[ "$(nh_calls)" = "$before_calls" ] || fail "the dry run switched"
+
+step "manual pin: kept by switch, removed by clear"
+autopin_ pin hello --input toypkgs || fail "autopin pin failed"
+expect_pins a "toypkgs.hello"
+[ "$(field a toypkgs hello reason)" = manual ] || fail "hello should be a manual pin"
+autopin_ switch || fail "autopin switch gave up with a manual pin"
+reject_log "retrying"
+expect_pins a "toypkgs.hello"
+git -C "$sys" log -1 --format=%s | grep -qF "autopin: update pins" || fail "switch did not commit the manual pin"
+autopin_ clear hello || fail "autopin clear failed"
+expect_log "cleared host a: toypkgs.hello"
+expect_pins a ""
 
 printf '\nall e2e steps passed\n'

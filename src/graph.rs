@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 const STORE: &str = "/nix/store/";
 
@@ -106,7 +106,34 @@ impl Graph {
         }
     }
 
-    pub fn ancestors(&self, start: &str, cap: usize) -> Option<HashSet<String>> {
+    /// Every derivation `top` depends on, itself included: one host's closure.
+    pub fn closure(&self, top: &str) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![top.to_string()];
+        while let Some(p) = stack.pop() {
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            if let Some(n) = self.nodes.get(&p) {
+                stack.extend(n.inputs.iter().cloned());
+            }
+        }
+        seen
+    }
+
+    fn parents_within<'a>(
+        &'a self,
+        p: &str,
+        within: &'a HashSet<String>,
+    ) -> impl Iterator<Item = &'a String> {
+        self.nodes
+            .get(p)
+            .into_iter()
+            .flat_map(|n| n.parents.iter())
+            .filter(move |q| within.contains(*q))
+    }
+
+    pub fn ancestors(&self, start: &str, within: &HashSet<String>, cap: usize) -> Option<HashSet<String>> {
         let mut seen = HashSet::new();
         let mut stack = vec![start.to_string()];
         while let Some(p) = stack.pop() {
@@ -116,22 +143,60 @@ impl Graph {
             if seen.len() > cap {
                 return None;
             }
-            if let Some(n) = self.nodes.get(&p) {
-                stack.extend(n.parents.iter().cloned());
-            }
+            stack.extend(self.parents_within(&p, within).cloned());
         }
         Some(seen)
     }
 
-    /// Walk up from a failed derivation to the packages that should be pinned.
+    /// Derivation names on a shortest path from `from` up to `to`.
+    pub fn trail(&self, from: &str, to: &str, within: &HashSet<String>) -> Vec<String> {
+        let mut prev: HashMap<String, String> = HashMap::new();
+        let mut queue = VecDeque::from([from.to_string()]);
+        let mut seen = HashSet::from([from.to_string()]);
+        while let Some(p) = queue.pop_front() {
+            if p == to {
+                let mut path = vec![p.clone()];
+                let mut cur = p;
+                while let Some(q) = prev.get(&cur) {
+                    path.push(q.clone());
+                    cur = q.clone();
+                }
+                path.reverse();
+                return path.iter().map(|d| self.display_name(d)).collect();
+            }
+            for q in self.parents_within(&p, within) {
+                if seen.insert(q.clone()) {
+                    prev.insert(q.clone(), p.clone());
+                    queue.push_back(q.clone());
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn display_name(&self, drv: &str) -> String {
+        match self.nodes.get(drv) {
+            Some(n) if !n.name.is_empty() => n.name.clone(),
+            _ => drv.to_string(),
+        }
+    }
+
+    /// Walk up from a failed derivation, inside one host's closure, to the
+    /// packages that should be pinned.
     ///
     /// A root is a matched derivation (one that is a top-level attribute of a
     /// package set) with at least one unmatched parent: it is consumed directly by
     /// configuration glue, not only by other packages. Pinning it swaps it in
     /// `final`, so matched parents pick up the pinned copy. Reaching the top of
-    /// the graph without passing a root means the failure is in the
+    /// the closure without passing a root means the failure is in the
     /// configuration itself and cannot be pinned.
-    pub fn find_roots(&self, start: &str, cap: usize, is_match: impl Fn(&str) -> bool) -> Ascent {
+    pub fn find_roots(
+        &self,
+        start: &str,
+        within: &HashSet<String>,
+        cap: usize,
+        is_match: impl Fn(&str) -> bool,
+    ) -> Ascent {
         let mut roots = BTreeSet::new();
         let mut seen = HashSet::new();
         let mut stack = vec![start.to_string()];
@@ -142,17 +207,17 @@ impl Graph {
             if seen.len() > cap {
                 return Ascent::TooLarge;
             }
-            let parents: &[String] = self.nodes.get(&p).map_or(&[], |n| &n.parents);
+            let parents: Vec<&String> = self.parents_within(&p, within).collect();
             if is_match(&p) {
                 if parents.is_empty() || parents.iter().any(|q| !is_match(q)) {
                     roots.insert(p);
                 } else {
-                    stack.extend(parents.iter().cloned());
+                    stack.extend(parents.into_iter().cloned());
                 }
             } else if parents.is_empty() {
                 return Ascent::Unpinnable { via: p };
             } else {
-                stack.extend(parents.iter().cloned());
+                stack.extend(parents.into_iter().cloned());
             }
         }
         Ascent::Roots(roots)
@@ -167,10 +232,14 @@ mod tests {
         format!("{STORE}{p}")
     }
 
+    fn parse(json: serde_json::Value) -> Graph {
+        Graph::from_show_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
     // toplevel -> system-path -> {obs, vlc}; obs -> libfoo; vlc -> libfoo;
     // toplevel -> etc -> unit -> libbar; obs-src fetch under obs.
     fn graph() -> Graph {
-        let json = serde_json::json!({
+        parse(serde_json::json!({
             "version": 4,
             "derivations": {
                 "t-toplevel.drv": { "name": "nixos-system", "env": {}, "inputs": { "drvs": { "sp-system-path.drv": {}, "e-etc.drv": {} }, "srcs": [] } },
@@ -183,8 +252,11 @@ mod tests {
                 "u-unit.drv": { "name": "unit-foo.service", "env": {}, "inputs": { "drvs": { "b-libbar-1.drv": {} } } },
                 "b-libbar-1.drv": { "name": "libbar-1", "env": { "pname": "libbar" }, "inputs": { "drvs": {} } }
             }
-        });
-        Graph::from_show_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+        }))
+    }
+
+    fn all(g: &Graph) -> HashSet<String> {
+        g.nodes.keys().cloned().collect()
     }
 
     fn matched(names: &[&str]) -> impl Fn(&str) -> bool {
@@ -203,11 +275,10 @@ mod tests {
 
     #[test]
     fn parses_old_format() {
-        let json = serde_json::json!({
+        let g = parse(serde_json::json!({
             "/nix/store/a-app.drv": { "name": "app", "env": { "pname": "app" }, "inputDrvs": { "/nix/store/b-lib.drv": ["out"] } },
             "/nix/store/b-lib.drv": { "env": { "name": "lib" }, "inputDrvs": {} }
-        });
-        let g = Graph::from_show_json(&serde_json::to_vec(&json).unwrap()).unwrap();
+        }));
         assert_eq!(g.nodes[&s("b-lib.drv")].parents, vec![s("a-app.drv")]);
         assert_eq!(g.nodes[&s("b-lib.drv")].name, "lib");
     }
@@ -217,7 +288,7 @@ mod tests {
         let g = graph();
         let is_match = matched(&["o-obs-studio-31.drv", "v-vlc-3.drv", "l-libfoo-1.drv"]);
         assert_eq!(
-            g.find_roots(&s("l-libfoo-1.drv"), 1000, is_match),
+            g.find_roots(&s("l-libfoo-1.drv"), &all(&g), 1000, is_match),
             Ascent::Roots([s("o-obs-studio-31.drv"), s("v-vlc-3.drv")].into())
         );
     }
@@ -227,8 +298,12 @@ mod tests {
         let g = graph();
         let is_match = matched(&["o-obs-studio-31.drv", "v-vlc-3.drv"]);
         assert_eq!(
-            g.find_roots(&s("s-obs-src.drv"), 1000, is_match),
+            g.find_roots(&s("s-obs-src.drv"), &all(&g), 1000, is_match),
             Ascent::Roots([s("o-obs-studio-31.drv")].into())
+        );
+        assert_eq!(
+            g.trail(&s("s-obs-src.drv"), &s("o-obs-studio-31.drv"), &all(&g)),
+            vec!["obs-src".to_string(), "obs-studio-31".to_string()]
         );
     }
 
@@ -237,7 +312,7 @@ mod tests {
         let g = graph();
         let is_match = matched(&["b-libbar-1.drv"]);
         assert_eq!(
-            g.find_roots(&s("b-libbar-1.drv"), 1000, is_match),
+            g.find_roots(&s("b-libbar-1.drv"), &all(&g), 1000, is_match),
             Ascent::Roots([s("b-libbar-1.drv")].into())
         );
     }
@@ -247,7 +322,7 @@ mod tests {
         let g = graph();
         let is_match = matched(&["o-obs-studio-31.drv"]);
         assert_eq!(
-            g.find_roots(&s("u-unit.drv"), 1000, is_match),
+            g.find_roots(&s("u-unit.drv"), &all(&g), 1000, is_match),
             Ascent::Unpinnable { via: s("t-toplevel.drv") }
         );
     }
@@ -255,8 +330,37 @@ mod tests {
     #[test]
     fn caps_large_ascents() {
         let g = graph();
-        assert_eq!(g.find_roots(&s("l-libfoo-1.drv"), 2, |_| false), Ascent::TooLarge);
-        assert!(g.ancestors(&s("l-libfoo-1.drv"), 2).is_none());
-        assert_eq!(g.ancestors(&s("l-libfoo-1.drv"), 100).unwrap().len(), 5);
+        let a = all(&g);
+        assert_eq!(g.find_roots(&s("l-libfoo-1.drv"), &a, 2, |_| false), Ascent::TooLarge);
+        assert!(g.ancestors(&s("l-libfoo-1.drv"), &a, 2).is_none());
+        assert_eq!(g.ancestors(&s("l-libfoo-1.drv"), &a, 100).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn closure_limits_the_ascent_to_one_host() {
+        // A second host whose top holds only vlc: libfoo there must resolve to
+        // vlc alone, never to obs from the other host.
+        let g = parse(serde_json::json!({
+            "version": 4,
+            "derivations": {
+                "a-top.drv": { "name": "top-a", "env": {}, "inputs": { "drvs": { "o-obs-studio-31.drv": {} } } },
+                "b-top.drv": { "name": "top-b", "env": {}, "inputs": { "drvs": { "v-vlc-3.drv": {} } } },
+                "o-obs-studio-31.drv": { "name": "obs-studio-31", "env": { "pname": "obs-studio" }, "inputs": { "drvs": { "l-libfoo-1.drv": {} } } },
+                "v-vlc-3.drv": { "name": "vlc-3", "env": { "pname": "vlc" }, "inputs": { "drvs": { "l-libfoo-1.drv": {} } } },
+                "l-libfoo-1.drv": { "name": "libfoo-1", "env": { "pname": "libfoo" }, "inputs": { "drvs": {} } }
+            }
+        }));
+        let b = g.closure(&s("b-top.drv"));
+        assert_eq!(b.len(), 3);
+        assert!(!g.closure(&s("a-top.drv")).contains(&s("v-vlc-3.drv")));
+        let is_match = matched(&["o-obs-studio-31.drv", "v-vlc-3.drv", "l-libfoo-1.drv"]);
+        assert_eq!(
+            g.find_roots(&s("l-libfoo-1.drv"), &b, 1000, is_match),
+            Ascent::Roots([s("v-vlc-3.drv")].into())
+        );
+        assert_eq!(
+            g.trail(&s("l-libfoo-1.drv"), &s("v-vlc-3.drv"), &b),
+            vec!["libfoo-1".to_string(), "vlc-3".to_string()]
+        );
     }
 }
