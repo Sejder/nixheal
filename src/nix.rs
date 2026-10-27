@@ -98,6 +98,11 @@ impl Monitor {
                 self.pipe = None;
             }
             let line = String::from_utf8_lossy(&buf);
+            if !self.active()
+                && let Some(text) = logparse::activity_text(line.trim_end())
+            {
+                log::nix_progress(&text);
+            }
             if let Some(msg) = logparse::error_message(line.trim_end()) {
                 if !self.active() {
                     log::nix_error(&msg);

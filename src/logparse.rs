@@ -98,6 +98,16 @@ pub fn eval_context(messages: &[String]) -> Vec<String> {
     out
 }
 
+/// The "building '...'" and "copying path '...'" lines nix prints for its
+/// builds and substitutions, from internal-json activity starts.
+pub fn activity_text(line: &str) -> Option<String> {
+    let json: Value = serde_json::from_str(line.strip_prefix("@nix ")?).ok()?;
+    if json["action"] != "start" || !matches!(json["type"].as_u64(), Some(100) | Some(105)) {
+        return None;
+    }
+    json["text"].as_str().filter(|t| !t.is_empty()).map(strip_ansi)
+}
+
 /// The text of an error-level message from a `--log-format internal-json` stderr line.
 pub fn error_message(line: &str) -> Option<String> {
     let json: Value = serde_json::from_str(line.strip_prefix("@nix ")?).ok()?;
@@ -217,6 +227,21 @@ mod tests {
                 Failure::Eval { attr: "_1password".into(), kind: EvalKind::Removed },
             ]
         );
+    }
+
+    #[test]
+    fn activity_lines() {
+        let started: Vec<String> = include_str!("../tests/fixtures/build-failure.jsonl")
+            .lines()
+            .filter_map(activity_text)
+            .collect();
+        assert!(started.contains(&"building '/nix/store/w7w5jmhzl1x5489mv05b6ai9994bvzyx-libfoo-1.2.drv'".to_string()));
+        assert!(started.iter().all(|t| t.starts_with("building ") || t.starts_with("copying path ")));
+        assert_eq!(
+            activity_text(r#"@nix {"action":"start","id":1,"level":4,"parent":0,"text":"copying path '/nix/store/x-a' from 'https://cache.nixos.org'","type":100}"#).as_deref(),
+            Some("copying path '/nix/store/x-a' from 'https://cache.nixos.org'")
+        );
+        assert_eq!(activity_text(r#"@nix {"action":"start","id":2,"level":0,"parent":0,"text":"","type":102}"#), None);
     }
 
     #[test]

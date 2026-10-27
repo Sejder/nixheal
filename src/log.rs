@@ -28,6 +28,14 @@ pub fn change(msg: &str) {
     eprintln!("autopin: {msg}");
 }
 
+/// A build or download nix starts, forwarded off a terminal so the journal
+/// shows progress as plain nix would; hidden with --quiet.
+pub fn nix_progress(msg: &str) {
+    if !is_quiet() {
+        eprintln!("{msg}");
+    }
+}
+
 /// An error message forwarded from nix; hidden with --quiet.
 pub fn nix_error(msg: &str) {
     if !is_quiet() {
