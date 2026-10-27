@@ -225,8 +225,8 @@ impl Engine {
                 })
                 .collect();
             if attrs.is_empty() {
-                let first = msgs.first().and_then(|m| m.lines().next()).unwrap_or("").to_string();
-                st.status = Status::Failed(format!("evaluation fails in a way autopin cannot pin: {first}"));
+                let why = msgs.first().map_or_else(String::new, |m| logparse::headline(m));
+                st.status = Status::Failed(format!("evaluation fails in a way autopin cannot pin: {why}"));
                 continue;
             }
             let mut wanted = Vec::new();

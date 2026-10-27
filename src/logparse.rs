@@ -44,6 +44,28 @@ pub fn strip_version(name: &str) -> &str {
         .map_or(name, |m| m.as_str())
 }
 
+/// The line of a nix error that says what went wrong. Messages open with a
+/// bare "error:" and a trace of "… while evaluating" frames; a failed assertion
+/// lists its reasons as "- " items after "Failed assertions:".
+pub fn headline(msg: &str) -> String {
+    let msg = strip_ansi(msg);
+    let lines: Vec<&str> = msg.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let informative = |l: &&str| {
+        !l.starts_with('\u{2026}')
+            && !l.starts_with("at ")
+            && !l.contains('|')
+            && *l != "error:"
+            && !l.starts_with("(stack trace truncated")
+    };
+    if let Some(i) = lines.iter().position(|l| l.ends_with("Failed assertions:"))
+        && let Some(item) = lines[i + 1..].iter().find(|l| l.starts_with("- "))
+    {
+        return item.trim_start_matches("- ").to_string();
+    }
+    let last = lines.iter().rev().find(|l| informative(l)).copied().unwrap_or("");
+    last.strip_prefix("error: ").unwrap_or(last).to_string()
+}
+
 /// The text of an error-level message from a `--log-format internal-json` stderr line.
 pub fn error_message(line: &str) -> Option<String> {
     let json: Value = serde_json::from_str(line.strip_prefix("@nix ")?).ok()?;
@@ -170,6 +192,18 @@ mod tests {
         assert_eq!(error_message(r#"@nix {"action":"msg","level":3,"msg":"these 2 derivations will be built:"}"#), None);
         assert_eq!(error_message("plain text"), None);
         assert!(parse(&["error: something unrelated".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn headline_skips_the_trace() {
+        let assertion = "error:\n       \u{2026} while calling the 'head' builtin\n         at /nix/store/x/lib/attrsets.nix:1711:13:\n         1710|           if x then\n\n       error:\n       Failed assertions:\n       - The option definition `boot.initrd.systemd.enable' in `/x/boot-unlock.nix' no longer has any effect; please remove it.\n       Scripted initrd has been removed.\n";
+        assert_eq!(
+            headline(assertion),
+            "The option definition `boot.initrd.systemd.enable' in `/x/boot-unlock.nix' no longer has any effect; please remove it."
+        );
+        let plain = "error:\n       \u{2026} while evaluating the attribute 'x'\n\n       (stack trace truncated; use '--show-trace' to show the full, detailed trace)\n\n       error: undefined variable 'foo'\n";
+        assert_eq!(headline(plain), "undefined variable 'foo'");
+        assert_eq!(headline("error: something broke"), "something broke");
     }
 
     #[test]
