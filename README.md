@@ -1,7 +1,7 @@
-# autopin
+# nixheal
 
 One package that fails to build should not hold back every other update.
-autopin updates your flake and builds your hosts. Any package that fails is
+nixheal updates your flake and builds your hosts. Any package that fails is
 pinned to the nixpkgs it last built with, and every other package moves on. The
 pin is removed by itself once the package builds again. A host that pinning
 cannot fix, because of a kernel, glibc or a module error, stays on its last good
@@ -11,14 +11,14 @@ lock while the other hosts update.
 
 ```nix
 # flake.nix
-inputs.autopin.url = "git+https://gitlab.sejder.dev/Sejder/autopin.git";
+inputs.nixheal.url = "git+https://gitlab.sejder.dev/Sejder/nixheal.git";
 
 # in every NixOS host
-imports = [ inputs.autopin.nixosModules.default ];
-programs.autopin = {
+imports = [ inputs.nixheal.nixosModules.default ];
+programs.nixheal = {
   enable = true;
-  pinsFile = ./pins.json;      # autopin creates it
-  hosts = [ "ideapad" ];       # what this machine builds when autopin runs here
+  pinsFile = ./pins.json;      # nixheal creates it
+  hosts = [ "ideapad" ];       # what this machine builds when nixheal runs here
   nixpkgs.nixpkgs-unstable = { # extra package sets, pinned too
     source = inputs.nixpkgs-unstable;
     argName = "unstable-pkgs";
@@ -34,32 +34,32 @@ Options:
 
 | Option | Meaning |
 |---|---|
-| `enable` | apply this machine's pins; also install autopin when `hosts`/`homes` is set |
+| `enable` | apply this machine's pins; also install nixheal when `hosts`/`homes` is set |
 | `pinsFile` | the flake's `pins.json` |
 | `flake` | the checkout to update, default `programs.nh.flake` |
-| `hosts`, `homes` | configurations to build and pin when autopin runs here |
+| `hosts`, `homes` | configurations to build and pin when nixheal runs here |
 | `warnAfterDays` | log a pin at warning level after this many days (14) |
 | `deny` | extra attrs never to pin (`cuda*`) |
 | `quiet` | always run as `--quiet` |
 | `nixpkgs.<input>` | import another nixpkgs with pins; `argName` passes it to modules |
 
-The settings are written to `/etc/autopin.json` or `~/.config/autopin.json`,
-so autopin keeps working when the updated flake no longer evaluates.
+The settings are written to `/etc/nixheal.json` or `~/.config/nixheal.json`,
+so nixheal keeps working when the updated flake no longer evaluates.
 
 ## Use
 
 ```
-autopin update [INPUT...]   # nix flake update, pin/unpin, commit, nh switch
-autopin switch              # pin/unpin against the current lock, commit, nh switch
-autopin status              # pins and held hosts, with their age
-autopin why <attr>          # failed drv, path up to the package, build log tail
-autopin pin <attr>          # pin by hand at the current lock, kept until cleared
-autopin clear <attr>        # remove a pin; --held releases a held host
-autopin merge <file>        # fold another pins.json in; per host, the newer lock wins
+nixheal update [INPUT...]   # nix flake update, pin/unpin, commit, nh switch
+nixheal switch              # pin/unpin against the current lock, commit, nh switch
+nixheal status              # pins and held hosts, with their age
+nixheal why <attr>          # failed drv, path up to the package, build log tail
+nixheal pin <attr>          # pin by hand at the current lock, kept until cleared
+nixheal clear <attr>        # remove a pin; --held releases a held host
+nixheal merge <file>        # fold another pins.json in; per host, the newer lock wins
 ```
 
 - `update` and `switch` take `--dry-run`, `--no-commit`, `--no-switch` and `--only <name>`.
-- `-q` / `--quiet` (or `programs.autopin.quiet = true`) prints only pins, unpins, holds, warnings and errors. nh's own output is unchanged.
+- `-q` / `--quiet` (or `programs.nixheal.quiet = true`) prints only pins, unpins, holds, warnings and errors. nh's own output is unchanged.
 - They run in a dirty tree and commit only `flake.lock` and `pins.json`.
 - If the machine's own configuration cannot be fixed, both files are put back. Nothing is committed and nothing is switched.
 - With `--no-switch` nothing local needs protecting, so the machine's own host is held like any other. That is the mode for a fleet build host.

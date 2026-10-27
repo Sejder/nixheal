@@ -92,7 +92,7 @@ fn main() -> ExitCode {
         Command::Clear { pick, attr, input, held } => cmd::clear(pick, attr.as_deref(), input.as_deref(), *held),
     };
     result.unwrap_or_else(|e| {
-        eprintln!("autopin: error: {e:#}");
+        eprintln!("nixheal: error: {e:#}");
         ExitCode::from(2)
     })
 }

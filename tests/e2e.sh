@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# End-to-end run of autopin against a toy nixpkgs whose history breaks and then
-# fixes packages, on two toy hosts: a (the machine autopin runs on) and b.
+# End-to-end run of nixheal against a toy nixpkgs whose history breaks and then
+# fixes packages, on two toy hosts: a (the machine nixheal runs on) and b.
 # Needs a working nix with flakes; run from anywhere:
 #
 #   cargo build && tests/e2e.sh
 #
-# AUTOPIN overrides the binary under test. nh is replaced by a stub that
+# NIXHEAL overrides the binary under test. nh is replaced by a stub that
 # records its arguments.
 
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-autopin="${AUTOPIN:-$repo/target/debug/autopin}"
+nixheal="${NIXHEAL:-$repo/target/debug/nixheal}"
 nix() { command nix --extra-experimental-features "nix-command flakes" "$@"; }
 system="$(nix eval --raw --impure --expr builtins.currentSystem)"
 
@@ -21,7 +21,7 @@ toy="$work/toypkgs"
 sys="$work/system"
 log="$work/log"
 calls="$work/nh.calls"
-config="$work/autopin.json"
+config="$work/nixheal.json"
 salt="$(date +%s%N)"
 
 export XDG_STATE_HOME="$work/state"
@@ -64,7 +64,7 @@ expect_log() { grep -qF -- "$1" "$log" || fail "log lacks: $1"; }
 reject_log() { if grep -qF -- "$1" "$log"; then fail "log unexpectedly has: $1"; fi; }
 commits() { git -C "$sys" rev-list --count HEAD; }
 
-# nh gets the system autopin built, so it does not evaluate the flake again.
+# nh gets the system nixheal built, so it does not evaluate the flake again.
 expect_switched_to_built() {
   local want
   want="$(nix eval --raw "$sys#nixosConfigurations.$1.config.system.build.toplevel.outPath")"
@@ -85,13 +85,13 @@ write_config() {
 EOF
 }
 
-autopin_() {
+nixheal_() {
   set +e
-  "$autopin" "$@" --config "$config" >"$work/stdout" 2>"$log"
+  "$nixheal" "$@" --config "$config" >"$work/stdout" 2>"$log"
   local rc=$?
   set -e
   cat "$work/stdout" >>"$log"
-  grep -h 'autopin:' "$log" | sed 's/^/  | /' || true
+  grep -h 'nixheal:' "$log" | sed 's/^/  | /' || true
   return $rc
 }
 
@@ -103,7 +103,7 @@ EOF
   git -C "$toy" commit -qm "libfoo=$1 gone-removed=$2 hello=$3 linux=$4"
 }
 
-[ -x "$autopin" ] || fail "$autopin is not built; run cargo build first"
+[ -x "$nixheal" ] || fail "$nixheal is not built; run cargo build first"
 
 mkdir -p "$toy" "$sys"
 git -C "$toy" init -q -b main
@@ -160,7 +160,7 @@ cat >"$sys/flake.nix" <<EOF
             paths = paths pkgs;
           };
         in {
-          config.programs.autopin.packageSets.toypkgs = pkgs;
+          config.programs.nixheal.packageSets.toypkgs = pkgs;
           config.system.build.toplevel = derivation {
             name = "toplevel-\${name}";
             inherit system;
@@ -185,7 +185,7 @@ git -C "$sys" add flake.lock
 git -C "$sys" commit -qm system
 
 step "r1: everything builds; update creates pins.json, commits it and switches a"
-autopin_ update || fail "autopin update gave up on r1"
+nixheal_ update || fail "nixheal update gave up on r1"
 expect_log "created $sys/pins.json"
 git -C "$sys" ls-files --error-unmatch pins.json >/dev/null || fail "pins.json is not tracked"
 git -C "$sys" diff --quiet HEAD -- pins.json || fail "pins.json is not committed"
@@ -196,7 +196,7 @@ expect_pins b ""
 step "r2: libfoo breaks (only b uses app) and gone is removed (only a uses it)"
 revision broken true 2 ok
 before_calls="$(nh_calls)"
-autopin_ update || fail "autopin update gave up on r2"
+nixheal_ update || fail "nixheal update gave up on r2"
 expect_pins a "toypkgs.gone"
 expect_pins b "toypkgs.app"
 [ "$(field a toypkgs gone reason)" = eval ] || fail "gone on a should be an eval pin"
@@ -209,21 +209,21 @@ expect_built b hello-2
 since_gone="$(field a toypkgs gone since)"
 
 step "why: explain the app pin on b"
-autopin_ why app --host b || fail "autopin why failed"
+nixheal_ why app --host b || fail "nixheal why failed"
 expect_log "-libfoo-1.0.drv"
 expect_log "trail:    libfoo-1.0 -> app-2.0"
 expect_log "libfoo does not compile"
 
 step "r2 switch: no update, so nothing is retried and nothing is committed"
 before_commits="$(commits)"
-autopin_ switch || fail "autopin switch gave up on r2"
+nixheal_ switch || fail "nixheal switch gave up on r2"
 reject_log "retrying"
 [ "$(commits)" = "$before_commits" ] || fail "switch committed without changes"
 expect_switched_to_built a
 
 step "r3: libfoo is fixed, gone is still removed"
 revision fixed true 3 ok
-autopin_ update || fail "autopin update gave up on r3"
+nixheal_ update || fail "nixheal update gave up on r3"
 expect_log "unpinned host b: toypkgs.app: builds again"
 expect_log "still failing host a: toypkgs.gone"
 expect_pins a "toypkgs.gone"
@@ -234,19 +234,19 @@ cp "$sys/flake.lock" "$r3_lock"
 
 step "r4: linux breaks on b (denylisted): b is held on the r3 lock, a moves on"
 revision fixed true 4 broken
-autopin_ update || fail "autopin update gave up on r4"
+nixheal_ update || fail "nixheal update gave up on r4"
 expect_log "held host b on its last good lock"
 case "$(held_reason b)" in *"linux fails but is never pinned"*) ;; *) fail "b should be held for linux: $(held_reason b)" ;; esac
 held_rev="$(jq_pins 'f.hosts.b.held.lock.nodes.toypkgs.locked.rev')"
 r3_rev="$(nix eval --raw --impure --expr "(builtins.fromJSON (builtins.readFile $r3_lock)).nodes.toypkgs.locked.rev")"
 [ "$held_rev" = "$r3_rev" ] || fail "b is held on $held_rev, expected the r3 lock $r3_rev"
 expect_built a hello-4
-autopin_ status || fail "autopin status failed"
+nixheal_ status || fail "nixheal status failed"
 expect_log "host b	HELD since"
 
 step "r5: linux is fixed and gone is back: b is released, a unpins"
 revision fixed false 5 ok
-autopin_ update || fail "autopin update gave up on r5"
+nixheal_ update || fail "nixheal update gave up on r5"
 expect_log "released host b"
 expect_log "unpinned host a: toypkgs.gone: builds again"
 expect_pins a ""
@@ -254,10 +254,10 @@ expect_pins b ""
 [ -z "$(held_reason b)" ] || fail "b is still held"
 
 step "r5 quiet switch: nothing changes, so nothing is printed"
-autopin_ switch --quiet || fail "the quiet switch gave up"
+nixheal_ switch --quiet || fail "the quiet switch gave up"
 reject_log "round 1:"
 reject_log "builds"
-[ -z "$(grep 'autopin:' "$log" || true)" ] || fail "the quiet switch printed: $(cat "$log")"
+[ -z "$(grep 'nixheal:' "$log" || true)" ] || fail "the quiet switch printed: $(cat "$log")"
 
 step "r6: hello breaks on a, the local host, and is denylisted: nothing changes"
 write_config '"hello"'
@@ -266,7 +266,7 @@ cp "$sys/flake.lock" "$work/before.lock"
 cp "$sys/pins.json" "$work/before.json"
 before_commits="$(commits)"
 before_calls="$(nh_calls)"
-if autopin_ update; then fail "autopin update should have given up on r6"; fi
+if nixheal_ update; then fail "nixheal update should have given up on r6"; fi
 expect_log "giving up on host a"
 expect_log "restored flake.lock and pins.json"
 cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored"
@@ -276,7 +276,7 @@ cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored"
 write_config ""
 
 step "r6 dry run, quiet: shows the hello pins and nothing else, writes nothing"
-autopin_ -q update --dry-run || fail "the dry run gave up"
+nixheal_ -q update --dry-run || fail "the dry run gave up"
 reject_log "round 1:"
 expect_log "dry run: would have pinned host a: toypkgs.hello"
 expect_log "dry run: would have pinned host b: toypkgs.hello"
@@ -286,14 +286,14 @@ cmp -s "$sys/pins.json" "$work/before.json" || fail "the dry run changed pins.js
 [ "$(nh_calls)" = "$before_calls" ] || fail "the dry run switched"
 
 step "manual pin: kept by switch, removed by clear"
-autopin_ pin hello --input toypkgs || fail "autopin pin failed"
+nixheal_ pin hello --input toypkgs || fail "nixheal pin failed"
 expect_pins a "toypkgs.hello"
 [ "$(field a toypkgs hello reason)" = manual ] || fail "hello should be a manual pin"
-autopin_ switch || fail "autopin switch gave up with a manual pin"
+nixheal_ switch || fail "nixheal switch gave up with a manual pin"
 reject_log "retrying"
 expect_pins a "toypkgs.hello"
-git -C "$sys" log -1 --format=%s | grep -qF "autopin: update pins" || fail "switch did not commit the manual pin"
-autopin_ clear hello || fail "autopin clear failed"
+git -C "$sys" log -1 --format=%s | grep -qF "nixheal: update pins" || fail "switch did not commit the manual pin"
+nixheal_ clear hello || fail "nixheal clear failed"
 expect_log "cleared host a: toypkgs.hello"
 expect_pins a ""
 
@@ -302,7 +302,7 @@ write_config '"gone"'
 revision fixed true 7 ok
 before_calls="$(nh_calls)"
 before_commits="$(commits)"
-autopin_ update --no-switch --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
+nixheal_ update --no-switch --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
 expect_log "held host a on its last good lock"
 reject_log "giving up on host a"
 case "$(held_reason a)" in *"gone fails but is never pinned"*) ;; *) fail "a should be held for gone: $(held_reason a)" ;; esac
@@ -324,10 +324,10 @@ mkpins() {
 }
 mkpins -100 older "$work/older.json"
 mkpins 100 newer "$work/newer.json"
-autopin_ merge "$work/older.json" || fail "merge failed"
+nixheal_ merge "$work/older.json" || fail "merge failed"
 expect_log "kept host b: it comes from a newer lock"
 expect_pins b ""
-autopin_ merge "$work/newer.json" || fail "merge failed"
+nixheal_ merge "$work/newer.json" || fail "merge failed"
 expect_log "took host b from"
 expect_pins b "toypkgs.newer"
 case "$(held_reason a)" in *"gone"*) ;; *) fail "merge lost a's held entry" ;; esac

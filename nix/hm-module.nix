@@ -7,9 +7,9 @@ self:
   ...
 }:
 let
-  cfg = config.programs.autopin;
+  cfg = config.programs.nixheal;
   inNixos = osConfig != null;
-  osCfg = if inNixos then osConfig.programs.autopin or { } else { };
+  osCfg = if inNixos then osConfig.programs.nixheal or { } else { };
   globalPkgs = inNixos && (osConfig.home-manager.useGlobalPkgs or false);
   nhFlake = config.programs.nh.flake or null;
 
@@ -31,10 +31,10 @@ let
     }
   ) cfg.nixpkgs;
 
-  runsAutopin = !inNixos && (cfg.hosts != [ ] || cfg.homes != [ ]);
+  runsNixheal = !inNixos && (cfg.hosts != [ ] || cfg.homes != [ ]);
 in
 {
-  options.programs.autopin = import ./options.nix {
+  options.programs.nixheal = import ./options.nix {
     inherit lib self pkgs;
     defaultName = if inNixos then osConfig.networking.hostName else config.home.username;
     defaultEnable = osCfg.enable or false;
@@ -45,7 +45,7 @@ in
 
   config = lib.mkMerge [
     {
-      programs.autopin.packageSets = {
+      programs.nixheal.packageSets = {
         nixpkgs = pkgs;
       }
       // extraSets;
@@ -57,14 +57,14 @@ in
       assertions = [
         {
           assertion = cfg.pinsFile != null;
-          message = "programs.autopin.pinsFile must point at the flake's pins.json";
+          message = "programs.nixheal.pinsFile must point at the flake's pins.json";
         }
       ];
       nixpkgs.overlays = lib.mkAfter [ (overlay "nixpkgs" (config.nixpkgs.config or { })) ];
     })
-    (lib.mkIf (cfg.enable && runsAutopin) {
+    (lib.mkIf (cfg.enable && runsNixheal) {
       home.packages = [ cfg.package ];
-      xdg.configFile."autopin.json".text = builtins.toJSON {
+      xdg.configFile."nixheal.json".text = builtins.toJSON {
         kind = "home";
         self = cfg.name;
         inherit (cfg)

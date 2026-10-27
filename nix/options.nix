@@ -33,19 +33,19 @@ in
   enable = mkOption {
     type = types.bool;
     default = defaultEnable;
-    description = "Apply this machine's autopin pins, and install autopin when it builds hosts or homes.";
+    description = "Apply this machine's nixheal pins, and install nixheal when it builds hosts or homes.";
   };
   package = mkOption {
     type = types.package;
     default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-    defaultText = lib.literalExpression "autopin.packages.\${system}.default";
-    description = "The autopin package.";
+    defaultText = lib.literalExpression "nixheal.packages.\${system}.default";
+    description = "The nixheal package.";
   };
   pinsFile = mkOption {
     type = types.nullOr types.path;
     default = defaultPinsFile;
     example = lib.literalExpression "./pins.json";
-    description = "The flake's pins.json. It may not exist yet; autopin creates it.";
+    description = "The flake's pins.json. It may not exist yet; nixheal creates it.";
   };
   name = mkOption {
     type = types.str;
@@ -55,17 +55,17 @@ in
   flake = mkOption {
     type = types.nullOr types.str;
     default = defaultFlake;
-    description = "Path of the flake checkout that autopin updates.";
+    description = "Path of the flake checkout that nixheal updates.";
   };
   hosts = mkOption {
     type = types.listOf types.str;
     default = [ ];
-    description = "nixosConfigurations that autopin builds and pins when it runs here.";
+    description = "nixosConfigurations that nixheal builds and pins when it runs here.";
   };
   homes = mkOption {
     type = types.listOf types.str;
     default = [ ];
-    description = "homeConfigurations that autopin builds and pins when it runs here.";
+    description = "homeConfigurations that nixheal builds and pins when it runs here.";
   };
   warnAfterDays = mkOption {
     type = types.ints.unsigned;
@@ -99,6 +99,6 @@ in
   packageSets = mkOption {
     type = types.attrsOf types.raw;
     readOnly = true;
-    description = "Every package set autopin pins on this machine, keyed by flake input.";
+    description = "Every package set nixheal pins on this machine, keyed by flake input.";
   };
 }

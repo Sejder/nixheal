@@ -19,13 +19,13 @@ fn journal() -> bool {
 /// Progress; hidden with --quiet.
 pub fn info(msg: &str) {
     if !is_quiet() {
-        eprintln!("autopin: {msg}");
+        eprintln!("nixheal: {msg}");
     }
 }
 
-/// A pin, unpin, hold or release, or why autopin gave up; always shown.
+/// A pin, unpin, hold or release, or why nixheal gave up; always shown.
 pub fn change(msg: &str) {
-    eprintln!("autopin: {msg}");
+    eprintln!("nixheal: {msg}");
 }
 
 /// A build or download nix starts, forwarded off a terminal so the journal
@@ -46,8 +46,8 @@ pub fn nix_error(msg: &str) {
 /// Logged at warning priority when stderr goes to the journal.
 pub fn warn(msg: &str) {
     if journal() {
-        eprintln!("<4>autopin: warning: {msg}");
+        eprintln!("<4>nixheal: warning: {msg}");
     } else {
-        eprintln!("autopin: warning: {msg}");
+        eprintln!("nixheal: warning: {msg}");
     }
 }

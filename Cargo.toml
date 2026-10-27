@@ -1,5 +1,5 @@
 [package]
-name = "autopin"
+name = "nixheal"
 version = "0.1.0"
 edition = "2024"
 description = "Pin NixOS packages that fail to build to their last good nixpkgs, and unpin them once they build again"

@@ -24,7 +24,7 @@
         in
         {
           default = pkgs.rustPlatform.buildRustPackage {
-            pname = "autopin";
+            pname = "nixheal";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
             src = pkgs.lib.fileset.toSource {
               root = ./.;
@@ -38,9 +38,9 @@
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
-              wrapProgram $out/bin/autopin --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.nix-output-monitor ]}
+              wrapProgram $out/bin/nixheal --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.nix-output-monitor ]}
             '';
-            meta.mainProgram = "autopin";
+            meta.mainProgram = "nixheal";
           };
         }
       );
@@ -86,7 +86,7 @@
               self.nixosModules.default
               {
                 networking.hostName = "test";
-                programs.autopin = {
+                programs.nixheal = {
                   enable = true;
                   pinsFile = pins;
                   hosts = [ "test" ];
@@ -116,7 +116,7 @@
               )
             ];
           };
-          settings = builtins.fromJSON machine.config.environment.etc."autopin.json".text;
+          settings = builtins.fromJSON machine.config.environment.etc."nixheal.json".text;
         in
         {
           package = self.packages.${system}.default;
@@ -143,18 +143,18 @@
                 nixpkgsConfig = { };
               } prev prev).hello.drvPath
               == pkgs.hello.drvPath;
-            pkgs.runCommand "autopin-overlay-check" { } "touch $out";
+            pkgs.runCommand "nixheal-overlay-check" { } "touch $out";
           module =
             assert machine.pkgs.hello.pname == "hello";
             assert machine.pkgs.cowsay.pname == "cowsay-local";
-            assert machine.config.programs.autopin.packageSets ? extra;
+            assert machine.config.programs.nixheal.packageSets ? extra;
             assert machine.config.environment.etc."extra-hello".text == "hello";
             assert settings.self == "test";
             assert settings.kind == "nixos";
             assert settings.quiet == false;
             assert settings.inputs == [ "extra" "nixpkgs" ];
-            assert builtins.elem machine.config.programs.autopin.package machine.config.environment.systemPackages;
-            pkgs.runCommand "autopin-module-check" { } "touch $out";
+            assert builtins.elem machine.config.programs.nixheal.package machine.config.environment.systemPackages;
+            pkgs.runCommand "nixheal-module-check" { } "touch $out";
         }
       );
     };

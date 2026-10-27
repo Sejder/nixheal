@@ -140,7 +140,7 @@ impl PinsFile {
             Some(v) if v == VERSION as u64 => Ok(serde_json::from_value(json)?),
             Some(v) => bail!("pins file version {v} is not supported (expected {VERSION})"),
             None if json.as_object().is_some_and(|o| o.is_empty()) => Ok(Self::default()),
-            None => bail!("not an autopin pins file (no version)"),
+            None => bail!("not an nixheal pins file (no version)"),
         }
     }
 

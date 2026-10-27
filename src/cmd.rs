@@ -19,7 +19,7 @@ fn default_system() -> String {
 
 #[derive(clap::Args)]
 pub struct Where {
-    /// Config file; defaults to ~/.config/autopin.json, then /etc/autopin.json.
+    /// Config file; defaults to ~/.config/nixheal.json, then /etc/nixheal.json.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     /// Flake directory; defaults to the config's flake.
@@ -41,7 +41,7 @@ pub struct Build {
     /// Only these hosts or homes from the config; repeatable.
     #[arg(long = "only")]
     pub only: Vec<String>,
-    /// The last lock that built; defaults to the one autopin last saw build.
+    /// The last lock that built; defaults to the one nixheal last saw build.
     #[arg(long)]
     pub old_lock: Option<PathBuf>,
     #[arg(long, default_value_t = 8)]
@@ -125,7 +125,7 @@ fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<()> {
     Ok(())
 }
 
-/// Switch with nh. Given the system autopin just built, nh only diffs and
+/// Switch with nh. Given the system nixheal just built, nh only diffs and
 /// activates it; otherwise it evaluates and builds the flake itself.
 fn switch(target: &Target, flake: &Path, built: Option<&str>) -> Result<ExitCode> {
     let mut nh = Command::new("nh");
@@ -153,7 +153,7 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         targets.retain(|t| args.only.contains(&t.name));
     }
     if targets.is_empty() {
-        bail!("no hosts or homes to build: set programs.autopin.hosts or homes");
+        bail!("no hosts or homes to build: set programs.nixheal.hosts or homes");
     }
     let local = Some(cfg.local()).filter(|l| targets.contains(l));
     // Only a machine that is about to switch must not be held: with
@@ -241,7 +241,7 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
     if !args.no_commit
         && let Some(git) = &git
     {
-        let title = if update.is_some() { "autopin: update flake.lock" } else { "autopin: update pins" };
+        let title = if update.is_some() { "nixheal: update flake.lock" } else { "nixheal: update pins" };
         let mut message = title.to_string();
         if !report.changes.is_empty() {
             message.push_str("\n\n");
@@ -386,7 +386,7 @@ pub fn pin(pick: &Pick, attr: &str, input: &str) -> Result<ExitCode> {
         },
     );
     file.save(&pins_path)?;
-    println!("pinned {target}: {input}.{attr} at {at}; it stays until autopin clear");
+    println!("pinned {target}: {input}.{attr} at {at}; it stays until nixheal clear");
     Ok(ExitCode::SUCCESS)
 }
 

@@ -4,8 +4,8 @@ use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// What the NixOS or Home Manager module writes to /etc/autopin.json or
-/// ~/.config/autopin.json.
+/// What the NixOS or Home Manager module writes to /etc/nixheal.json or
+/// ~/.config/nixheal.json.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -71,7 +71,7 @@ impl Target {
     }
 
     pub fn package_sets(&self) -> String {
-        format!("{}.config.programs.autopin.packageSets", self.base())
+        format!("{}.config.programs.nixheal.packageSets", self.base())
     }
 }
 
@@ -103,19 +103,19 @@ fn user_config() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("autopin.json"))
+    Some(base.join("nixheal.json"))
 }
 
-/// The config in effect: an explicit path, then $AUTOPIN_CONFIG, then the
+/// The config in effect: an explicit path, then $NIXHEAL_CONFIG, then the
 /// Home Manager file, then the NixOS one.
 pub fn locate(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         return Some(p.to_path_buf());
     }
-    if let Some(p) = std::env::var_os("AUTOPIN_CONFIG") {
+    if let Some(p) = std::env::var_os("NIXHEAL_CONFIG") {
         return Some(PathBuf::from(p));
     }
-    [user_config(), Some(PathBuf::from("/etc/autopin.json"))]
+    [user_config(), Some(PathBuf::from("/etc/nixheal.json"))]
         .into_iter()
         .flatten()
         .find(|p| p.exists())
@@ -123,7 +123,7 @@ pub fn locate(explicit: Option<&Path>) -> Option<PathBuf> {
 
 pub fn load(explicit: Option<&Path>) -> Result<Config> {
     let Some(path) = locate(explicit) else {
-        bail!("no autopin config: enable programs.autopin, or pass --config");
+        bail!("no nixheal config: enable programs.nixheal, or pass --config");
     };
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     Config::parse(&bytes).with_context(|| format!("parsing {}", path.display()))
@@ -157,7 +157,7 @@ mod tests {
     fn target_attrs() {
         let h = Target::new(Kind::Nixos, "ideapad");
         assert_eq!(h.output(), "nixosConfigurations.ideapad.config.system.build.toplevel");
-        assert_eq!(h.package_sets(), "nixosConfigurations.ideapad.config.programs.autopin.packageSets");
+        assert_eq!(h.package_sets(), "nixosConfigurations.ideapad.config.programs.nixheal.packageSets");
         assert_eq!(h.to_string(), "host ideapad");
         let m = Target::new(Kind::Home, "mikke@wsl");
         assert_eq!(m.output(), "homeConfigurations.\"mikke@wsl\".activationPackage");

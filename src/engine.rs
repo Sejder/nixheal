@@ -19,7 +19,7 @@ pub struct Engine {
     pub new_lock: Lock,
     pub old_lock: Lock,
     pub targets: Vec<Target>,
-    /// The machine autopin runs on, when it is one of the targets. Its failure
+    /// The machine nixheal runs on, when it is one of the targets. Its failure
     /// aborts the run instead of holding it.
     pub local: Option<Target>,
     pub fallback_inputs: Vec<String>,
@@ -203,7 +203,7 @@ impl Engine {
                     let mine: Vec<&String> = failed.iter().filter(|d| closure.contains(*d)).collect();
                     let st = &mut states[*i];
                     if failed.is_empty() {
-                        st.status = Status::Failed("the build failed without a failure autopin recognises".into());
+                        st.status = Status::Failed("the build failed without a failure nixheal recognises".into());
                     } else if mine.is_empty() {
                         st.status = Status::Done;
                         st.drv = Some(top.clone());
@@ -226,7 +226,7 @@ impl Engine {
                 .collect();
             if attrs.is_empty() {
                 let why = msgs.first().map_or_else(String::new, |m| logparse::headline(m));
-                st.status = Status::Failed(format!("evaluation fails in a way autopin cannot pin: {why}"));
+                st.status = Status::Failed(format!("evaluation fails in a way nixheal cannot pin: {why}"));
                 continue;
             }
             let context = logparse::eval_context(&msgs);
