@@ -40,7 +40,7 @@ fn default_warn_after_days() -> i64 {
     14
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     pub kind: Kind,
     pub name: String,
@@ -56,7 +56,7 @@ impl Target {
 
     fn base(&self) -> String {
         match self.kind {
-            Kind::Nixos => format!("nixosConfigurations.{}", self.name),
+            Kind::Nixos => format!("nixosConfigurations.\"{}\"", self.name),
             Kind::Home => format!("homeConfigurations.\"{}\"", self.name),
         }
     }
@@ -79,6 +79,10 @@ impl Target {
             Kind::Nixos => self.name.clone(),
             Kind::Home => format!("home-{}", self.name),
         }
+    }
+
+    pub fn nixheal_config(&self) -> String {
+        format!("{}.config.programs.nixheal", self.base())
     }
 
     pub fn package_sets(&self) -> String {
@@ -169,11 +173,11 @@ mod tests {
         let h = Target::new(Kind::Nixos, "laptop");
         assert_eq!(
             h.output(),
-            "nixosConfigurations.laptop.config.system.build.toplevel"
+            "nixosConfigurations.\"laptop\".config.system.build.toplevel"
         );
         assert_eq!(
             h.package_sets(),
-            "nixosConfigurations.laptop.config.programs.nixheal.packageSets"
+            "nixosConfigurations.\"laptop\".config.programs.nixheal.packageSets"
         );
         assert_eq!(h.to_string(), "host laptop");
         let m = Target::new(Kind::Home, "alice@wsl");

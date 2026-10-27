@@ -7,6 +7,7 @@
   defaultPinsFile,
   defaultFlake,
   defaultSetConfig,
+  defaultInput ? "nixpkgs",
 }:
 let
   inherit (lib) mkOption types;
@@ -40,6 +41,12 @@ in
     default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
     defaultText = lib.literalExpression "nixheal.packages.\${system}.default";
     description = "The nixheal package.";
+  };
+  input = mkOption {
+    type = types.str;
+    default = defaultInput;
+    example = "nixos";
+    description = "The flake input this machine's pkgs come from, as named in flake.lock; pins for pkgs are kept under it.";
   };
   pinsFile = mkOption {
     type = types.nullOr types.path;

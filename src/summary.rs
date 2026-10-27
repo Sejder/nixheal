@@ -9,6 +9,15 @@ struct Item {
     days: Option<i64>,
 }
 
+/// How a target is named in a summary: hosts by name, homes as "home NAME", so
+/// a host and a home with the same name stay apart.
+fn label(target: &Target) -> String {
+    match target.kind {
+        crate::pins::Kind::Nixos => target.name.clone(),
+        crate::pins::Kind::Home => format!("home {}", target.name),
+    }
+}
+
 /// A flat summary of a pins file for dashboards, e.g. a homepage customapi
 /// widget: how much is pinned or held, the oldest of it, and one status word.
 ///
@@ -23,7 +32,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
         if let Some(h) = &entry.held {
             held += 1;
             items.push(Item {
-                what: format!("{} held", target.name),
+                what: format!("{} held", label(&target)),
                 kind: "held",
                 days: date::parse(&h.since).map(|d| today - d),
             });
@@ -31,7 +40,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
         for (_, attr, pin) in entry.iter() {
             pins += 1;
             items.push(Item {
-                what: format!("{}: {attr}", target.name),
+                what: format!("{}: {attr}", label(&target)),
                 kind: pin.reason.as_str(),
                 days: date::parse(&pin.since).map(|d| today - d),
             });
@@ -39,7 +48,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
     }
     items.sort_by_key(|i| std::cmp::Reverse(i.days.unwrap_or(i64::MAX)));
 
-    let is_stale = |i: &Item| i.days.is_none_or(|d| d > warn_after_days);
+    let is_stale = |i: &Item| i.kind != "manual" && i.days.is_none_or(|d| d > warn_after_days);
     let stale = items.iter().filter(|i| is_stale(i)).count();
     let status = if stale > 0 {
         "STALE"
@@ -172,9 +181,23 @@ mod tests {
         let s = summary(&f, today(), 14);
         assert_eq!(s["status"], "STALE");
         assert_eq!(s["stale"], 1);
-        assert_eq!(s["oldest"], "alice: zed-editor, 26d");
+        assert_eq!(s["oldest"], "home alice: zed-editor, 26d");
         assert_eq!(s["items"][0]["label"], "26d, eval, STALE");
+        assert_eq!(s["items"][0]["name"], "home alice: zed-editor");
         assert_eq!(s["items"][1]["name"], "pi held");
         assert_eq!(s["items"][1]["label"], "2d, held");
+    }
+
+    #[test]
+    fn manual_pins_never_go_stale() {
+        let mut f = PinsFile::default();
+        let mut p = pin("2026-01-01");
+        p.reason = Reason::Manual;
+        f.entry_mut(Kind::Nixos, "laptop")
+            .insert("nixpkgs", "hello", p);
+        let s = summary(&f, today(), 14);
+        assert_eq!(s["status"], "PINNED");
+        assert_eq!(s["stale"], 0);
+        assert_eq!(s["items"][0]["label"], "299d, manual");
     }
 }

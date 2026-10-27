@@ -20,7 +20,7 @@ jobs:
       - name: lint
         run: |
           nix develop -c cargo fmt --check
-          nix develop -c cargo clippy -- -D warnings
+          nix develop -c cargo clippy --all-targets -- -D warnings
       - name: flake check
         run: nix flake check -L
       - name: end to end

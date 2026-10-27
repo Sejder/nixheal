@@ -4,6 +4,7 @@ mod date;
 mod engine;
 mod git;
 mod graph;
+mod guard;
 mod lock;
 mod log;
 mod logparse;

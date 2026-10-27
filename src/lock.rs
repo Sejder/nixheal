@@ -3,6 +3,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct Lock {
     bytes: Vec<u8>,
     json: Value,

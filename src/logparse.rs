@@ -2,25 +2,25 @@ use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvalKind {
-    Missing,
-    Refused,
-    Removed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
+    /// A derivation that ran and failed: a broken package.
     Build { drv: String },
-    Eval { attr: String, kind: EvalKind },
+    /// A derivation that could not run here (wrong platform, no builder, a
+    /// timeout, out of memory): not something a pin can fix.
+    Infra { drv: String, reason: String },
+    /// An attribute evaluation refused: missing, removed, broken or insecure.
+    Eval { attr: String },
 }
 
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
-static CANNOT_BUILD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Cannot build '(/nix/store/[^']+\.drv)'\.\s*Reason: ([^\n]*)").unwrap()
-});
+static CANNOT_BUILD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Cannot build '(/[^']+\.drv)'\.\s*Reason: ([^\n]*)").unwrap());
 static BUILDER_FAILED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"builder for '(/nix/store/[^']+\.drv)' failed").unwrap());
+    LazyLock::new(|| Regex::new(r"builder for '(/[^']+\.drv)' failed").unwrap());
+static HASH_MISMATCH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"hash mismatch in fixed-output derivation '(/[^']+\.drv)'").unwrap()
+});
 static MISSING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"attribute '([^']+)' missing").unwrap());
 static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
@@ -131,6 +131,16 @@ pub fn error_message(line: &str) -> Option<String> {
     json["msg"].as_str().map(strip_ansi)
 }
 
+/// Whether a "Cannot build" reason means the build ran and failed, as opposed
+/// to a dependency failing or the build not being able to run here.
+fn reason_is_build_failure(reason: &str) -> bool {
+    reason.contains("builder failed") || reason.contains("hash mismatch")
+}
+
+fn is_dependency_failure(reason: &str) -> bool {
+    reason.contains("dependency failed") || reason.contains("dependencies failed")
+}
+
 pub fn parse(messages: &[String]) -> Vec<Failure> {
     let mut out = Vec::new();
     let mut push = |f: Failure| {
@@ -143,11 +153,26 @@ pub fn parse(messages: &[String]) -> Vec<Failure> {
         let msg = strip_ansi(msg);
 
         let mut found_build = false;
+        for c in HASH_MISMATCH.captures_iter(&msg) {
+            found_build = true;
+            push(Failure::Build {
+                drv: c[1].to_string(),
+            });
+        }
         for c in CANNOT_BUILD.captures_iter(&msg) {
             found_build = true;
-            if !c[2].contains("dependency failed") && !c[2].contains("dependencies failed") {
+            let reason = c[2].trim().trim_end_matches('.').to_string();
+            if is_dependency_failure(&reason) {
+                continue;
+            }
+            if reason_is_build_failure(&reason) {
                 push(Failure::Build {
                     drv: c[1].to_string(),
+                });
+            } else {
+                push(Failure::Infra {
+                    drv: c[1].to_string(),
+                    reason,
                 });
             }
         }
@@ -166,20 +191,30 @@ pub fn parse(messages: &[String]) -> Vec<Failure> {
                 .captures(&c[2])
                 .map(|b| b[1].to_string())
                 .unwrap_or_else(|| strip_version(&c[1]).to_string());
-            push(Failure::Eval {
-                attr,
-                kind: EvalKind::Refused,
-            });
+            push(Failure::Eval { attr });
         } else if let Some(c) = REMOVED.captures(&msg) {
             push(Failure::Eval {
                 attr: c[1].to_string(),
-                kind: EvalKind::Removed,
             });
         } else if let Some(c) = MISSING.captures(&msg) {
             push(Failure::Eval {
                 attr: c[1].to_string(),
-                kind: EvalKind::Missing,
             });
+        }
+    }
+    out
+}
+
+/// Every derivation nix reports as not built, for whatever reason, including
+/// the ones that only failed because a dependency did.
+pub fn failed_drvs(messages: &[String]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for msg in messages {
+        let msg = strip_ansi(msg);
+        for re in [&*CANNOT_BUILD, &*BUILDER_FAILED, &*HASH_MISMATCH] {
+            for c in re.captures_iter(&msg) {
+                out.insert(c[1].to_string());
+            }
         }
     }
     out
@@ -206,6 +241,40 @@ mod tests {
     }
 
     #[test]
+    fn hash_mismatch_is_a_build_failure() {
+        let msgs = fixture_messages(include_str!("../tests/fixtures/hash-mismatch.jsonl"));
+        let parsed = parse(&msgs);
+        assert_eq!(parsed.len(), 1, "{parsed:?}");
+        assert!(matches!(&parsed[0], Failure::Build { drv } if drv.ends_with("-fetched-1.0.drv")));
+        let all = failed_drvs(&msgs);
+        assert!(all.iter().any(|d| d.ends_with("-fetched-1.0.drv")));
+        assert!(all.iter().any(|d| d.ends_with("-app-1.0.drv")));
+    }
+
+    #[test]
+    fn platform_mismatch_is_infrastructure() {
+        let msgs = fixture_messages(include_str!("../tests/fixtures/platform-mismatch.jsonl"));
+        let parsed = parse(&msgs);
+        assert_eq!(parsed.len(), 1, "{parsed:?}");
+        assert!(
+            matches!(&parsed[0], Failure::Infra { drv, reason } if drv.ends_with("-foreign-1.0.drv") && reason == "platform mismatch")
+        );
+    }
+
+    #[test]
+    fn other_stores_are_recognised() {
+        let msgs = vec![
+            "error: builder for '/opt/store/abc-foo-1.0.drv' failed with exit code 2".to_string(),
+        ];
+        assert_eq!(
+            parse(&msgs),
+            vec![Failure::Build {
+                drv: "/opt/store/abc-foo-1.0.drv".into()
+            }]
+        );
+    }
+
+    #[test]
     fn old_build_failure_format() {
         let msgs = vec![
             "error: builder for '/nix/store/abc-foo-1.0.drv' failed with exit code 2".to_string(),
@@ -226,8 +295,7 @@ mod tests {
         assert_eq!(
             parse(&msgs),
             vec![Failure::Eval {
-                attr: "nodejs_18".into(),
-                kind: EvalKind::Missing
+                attr: "nodejs_18".into()
             }]
         );
     }
@@ -242,12 +310,10 @@ mod tests {
             parse(&msgs),
             vec![
                 Failure::Eval {
-                    attr: "hello".into(),
-                    kind: EvalKind::Refused
+                    attr: "hello".into()
                 },
                 Failure::Eval {
-                    attr: "cuda-merged".into(),
-                    kind: EvalKind::Refused
+                    attr: "cuda-merged".into()
                 },
             ]
         );
@@ -263,12 +329,10 @@ mod tests {
             parse(&msgs),
             vec![
                 Failure::Eval {
-                    attr: "_0verkill".into(),
-                    kind: EvalKind::Removed
+                    attr: "_0verkill".into()
                 },
                 Failure::Eval {
-                    attr: "_1password".into(),
-                    kind: EvalKind::Removed
+                    attr: "_1password".into()
                 },
             ]
         );
@@ -327,12 +391,14 @@ mod tests {
     #[test]
     fn eval_context_innermost_first() {
         let msg = "error:\n       \u{2026} while evaluating the option `system.build.toplevel':\n       \u{2026} while evaluating the option `warnings':\n       \u{2026} while evaluating the option `systemd.services.open-webui.serviceConfig':\n       \u{2026} while evaluating derivation 'open-webui-0.12.3'\n       error: Refusing to evaluate package 'python3.14-posthog-7.71.0' in /nix/store/x-source/pkgs/development/python-modules/posthog/default.nix:80 because it has problems:\n".to_string();
-        assert_eq!(eval_context(&[msg.clone()]), vec!["open-webui".to_string()]);
+        assert_eq!(
+            eval_context(std::slice::from_ref(&msg)),
+            vec!["open-webui".to_string()]
+        );
         assert_eq!(
             parse(&[msg]),
             vec![Failure::Eval {
-                attr: "python3.14-posthog".into(),
-                kind: EvalKind::Refused
+                attr: "python3.14-posthog".into()
             }]
         );
         let quoted = "\u{2026} while evaluating the option `services.\"nginx\".virtualHosts':\n\u{2026} while evaluating the option `systemd.user.services.foo.serviceConfig':".to_string();

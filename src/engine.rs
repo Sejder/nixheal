@@ -7,21 +7,30 @@ use crate::logparse::{self, Failure};
 use crate::nix::{Monitor, Nix};
 use crate::pins::{Entry, Held, Pin, PinsFile, Reason};
 use crate::resolve::{self, Matcher};
-use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use anyhow::{Result, bail};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 const ASCENT_CAP: usize = 20_000;
+
+/// A package more packages than this depend on is never pinned: the overlay
+/// would swap it in for all of them, and every one would rebuild from source.
+pub const MAX_DEPENDENTS: usize = 25;
 
 pub struct Engine {
     pub nix: Nix,
     pub pins_path: PathBuf,
     pub new_lock: Lock,
+    /// The last good lock for targets without one of their own.
     pub old_lock: Lock,
+    /// The lock each target last built with, where it is known.
+    pub last_good: HashMap<Target, Lock>,
     pub targets: Vec<Target>,
-    /// The machine nixheal runs on, when it is one of the targets. Its failure
-    /// aborts the run instead of holding it.
+    /// The machine nixheal runs on, when it is one of the targets and must not
+    /// be held. Its failure aborts the run instead of holding it.
     pub local: Option<Target>,
+    /// The machine nixheal runs on, when it is one of the targets.
+    pub local_target: Option<Target>,
     pub fallback_inputs: Vec<String>,
     pub deny: Vec<String>,
     pub system: String,
@@ -40,6 +49,17 @@ pub struct Report {
     pub local_drv: Option<String>,
     /// Every target that built, with its system's drv.
     pub built: Vec<(Target, String)>,
+    /// The machine's own target was held (only possible with --hold-local).
+    pub local_held: bool,
+}
+
+/// What a target's own programs.nixheal says, read before anything builds.
+#[derive(Debug, serde::Deserialize)]
+struct Probe {
+    enable: bool,
+    name: String,
+    pins: Option<String>,
+    sets: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -63,6 +83,7 @@ struct State {
     entry: Entry,
     held_before: Option<Held>,
     held_lock: Option<Lock>,
+    old_lock: Lock,
     retrying: BTreeMap<(String, String), Pin>,
     inputs: Vec<String>,
     drv: Option<String>,
@@ -147,19 +168,8 @@ impl Engine {
         entry.lock_sha256 = self.new_lock.sha256();
         entry.lock_last_modified = self.new_lock.last_modified();
 
-        let inputs = if self.fallback_inputs.is_empty() {
-            self.nix
-                .attr_names(&target.package_sets())
-                .unwrap_or_else(|e| {
-                    log::info(&format!(
-                        "could not list package sets of {target}, assuming only nixpkgs: {}",
-                        e.to_string().lines().last().unwrap_or_default()
-                    ));
-                    vec!["nixpkgs".into()]
-                })
-        } else {
-            self.fallback_inputs.clone()
-        };
+        let inputs = self.probe(target)?;
+        let old_lock = self.last_good.get(target).unwrap_or(&self.old_lock).clone();
 
         Ok(State {
             target: target.clone(),
@@ -167,12 +177,52 @@ impl Engine {
             entry,
             held_before,
             held_lock,
+            old_lock,
             retrying,
             inputs,
             drv: None,
             system: std::cell::OnceCell::new(),
             status: Status::Active,
             new_pins: 0,
+        })
+    }
+
+    /// Check that the target applies the pins nixheal writes for it, and return
+    /// its package sets. A mismatch here would make every pin silently do
+    /// nothing, so it stops the run.
+    fn probe(&self, target: &Target) -> Result<Vec<String>> {
+        let apply = "c: { enable = c.enable or false; name = c.name or \"\"; \
+                     pins = if (c.pinsFile or null) == null then null else toString c.pinsFile; \
+                     sets = builtins.attrNames (c.packageSets or { }); }";
+        let probe: Probe = match self.nix.eval_apply(&target.nixheal_config(), apply) {
+            Ok(v) => serde_json::from_value(v)?,
+            Err(e) => bail!(
+                "cannot read programs.nixheal of {target}; is the nixheal module imported there?\n{}",
+                e.to_string().lines().last().unwrap_or_default()
+            ),
+        };
+        if !probe.enable {
+            bail!("programs.nixheal.enable is off in {target}, so its pins would not be applied");
+        }
+        if probe.name != target.name {
+            bail!(
+                "{target} has programs.nixheal.name = \"{}\"; it must be \"{}\", its configuration's name, or its pins are never applied",
+                probe.name,
+                target.name
+            );
+        }
+        match probe.pins.as_deref().map(flake_relative) {
+            None => bail!("programs.nixheal.pinsFile is not set in {target}"),
+            Some(Some(rel)) if rel == "pins.json" => {}
+            Some(rel) => bail!(
+                "{target} has programs.nixheal.pinsFile = {}; it must be pins.json at the flake root, where nixheal writes it",
+                rel.unwrap_or_else(|| probe.pins.clone().unwrap_or_default())
+            ),
+        }
+        Ok(if probe.sets.is_empty() {
+            self.fallback_inputs.clone()
+        } else {
+            probe.sets
         })
     }
 
@@ -222,14 +272,30 @@ impl Engine {
                     states[*i].drv = Some(drv.clone());
                 }
             } else {
+                let parsed = logparse::parse(&outcome.errors);
+                let infra: Vec<String> = parsed
+                    .iter()
+                    .filter_map(|f| match f {
+                        Failure::Infra { drv, reason } => Some(format!("{drv}: {reason}")),
+                        _ => None,
+                    })
+                    .collect();
+                if !infra.is_empty() {
+                    bail!(
+                        "some builds could not run on this machine, which a pin cannot fix; nothing was pinned or held:\n  {}",
+                        infra.join("\n  ")
+                    );
+                }
                 let failed = build_failures(&outcome.errors);
+                let not_built = logparse::failed_drvs(&outcome.errors);
                 let graph = self.nix.show_drvs(&drvs)?;
                 for (i, top) in &built {
                     let closure = graph.closure(top);
                     let mine: Vec<&String> =
                         failed.iter().filter(|d| closure.contains(*d)).collect();
                     let st = &mut states[*i];
-                    if failed.is_empty() {
+                    let own_build_failed = closure.iter().any(|d| not_built.contains(d));
+                    if mine.is_empty() && own_build_failed {
                         st.status = Status::Failed(
                             "the build failed without a failure nixheal recognises".into(),
                         );
@@ -249,8 +315,8 @@ impl Engine {
             let attrs: Vec<String> = logparse::parse(&msgs)
                 .into_iter()
                 .filter_map(|f| match f {
-                    Failure::Eval { attr, .. } => Some(attr),
-                    Failure::Build { .. } => None,
+                    Failure::Eval { attr } => Some(attr),
+                    _ => None,
                 })
                 .collect();
             if attrs.is_empty() {
@@ -348,6 +414,25 @@ impl Engine {
                 }
             };
             for root in &roots {
+                let dependents =
+                    graph
+                        .ancestors(root, closure, ASCENT_CAP)
+                        .map_or(usize::MAX, |a| {
+                            a.iter()
+                                .filter(|d| *d != root && matcher.matches(d))
+                                .count()
+                        });
+                if dependents > MAX_DEPENDENTS {
+                    return Ok(Err(format!(
+                        "{} is used by {} other packages; pinning it would rebuild them all from source",
+                        graph.display_name(root),
+                        if dependents == usize::MAX {
+                            "too many".to_string()
+                        } else {
+                            dependents.to_string()
+                        }
+                    )));
+                }
                 let attrs: BTreeSet<&(String, String)> = matcher.attrs(root).collect();
                 for (input, attr) in attrs {
                     if !wanted.iter().any(|w| &w.input == input && &w.attr == attr) {
@@ -375,7 +460,7 @@ impl Engine {
         if let Some((input, _)) = st.retrying.keys().find(|(_, a)| a == attr) {
             return Ok(Some(input.clone()));
         }
-        let old_lock = st.held_lock.as_ref().unwrap_or(&self.old_lock);
+        let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
         let system = st.system.get_or_init(|| {
             self.nix
                 .eval_raw(&st.target.system_attr())
@@ -439,7 +524,7 @@ impl Engine {
                     pin
                 }
                 None => {
-                    let old_lock = st.held_lock.as_ref().unwrap_or(&self.old_lock);
+                    let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
                     let locked = old_lock.locked(&w.input).ok_or_else(|| {
                         format!("{} is not an input of the last good lock", w.input)
                     })?;
@@ -524,12 +609,13 @@ impl Engine {
                         }
                         self.log_age(&target, input, attr, pin);
                     }
-                    if !file.merge(target.kind, &target.name, st.entry) {
-                        log::info(&format!("kept the entry for {target} from a newer lock"));
-                    }
+                    file.set(target.kind, &target.name, st.entry);
                     log::info(&format!("{target} builds"));
                 }
                 Status::Failed(reason) => {
+                    if Some(&target) == self.local_target.as_ref() {
+                        report.local_held = true;
+                    }
                     let mut entry = st.base.unwrap_or_default();
                     let held = match st.held_before {
                         Some(mut h) => {
@@ -541,7 +627,7 @@ impl Engine {
                             Held {
                                 since: date::format(self.today),
                                 reason: reason.clone(),
-                                lock: self.old_lock.json().clone(),
+                                lock: st.old_lock.json().clone(),
                             }
                         }
                     };
@@ -581,7 +667,7 @@ fn build_failures(errors: &[String]) -> Vec<String> {
         .into_iter()
         .filter_map(|f| match f {
             Failure::Build { drv } => Some(drv),
-            Failure::Eval { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -590,10 +676,47 @@ fn st_name(target: Option<&Target>) -> String {
     target.map_or_else(|| "the local machine".into(), Target::to_string)
 }
 
+/// The path of a store path below its store object, e.g. "hosts/a/pins.json"
+/// for /nix/store/<hash>-source/hosts/a/pins.json; None for other paths.
+fn flake_relative(path: &str) -> Option<String> {
+    let rest = path.strip_prefix('/')?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    let object = parts.iter().position(|p| {
+        p.len() > 33
+            && p.as_bytes()[32] == b'-'
+            && p[..32].bytes().all(|b| b.is_ascii_alphanumeric())
+    })?;
+    let rel = parts[object + 1..].join("/");
+    (!rel.is_empty()).then_some(rel)
+}
+
 pub fn describe(locked: &serde_json::Value) -> String {
     locked["rev"]
         .as_str()
         .map(|r| r.chars().take(12).collect())
         .or_else(|| locked["narHash"].as_str().map(str::to_string))
         .unwrap_or_else(|| "?".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pins_file_relative_to_the_flake() {
+        let h = "0123456789abcdfghijklmnpqrsvwxyz";
+        assert_eq!(
+            flake_relative(&format!("/nix/store/{h}-source/pins.json")).as_deref(),
+            Some("pins.json")
+        );
+        assert_eq!(
+            flake_relative(&format!("/nix/store/{h}-source/hosts/laptop/pins.json")).as_deref(),
+            Some("hosts/laptop/pins.json")
+        );
+        assert_eq!(
+            flake_relative(&format!("/opt/store/{h}-source/pins.json")).as_deref(),
+            Some("pins.json")
+        );
+        assert_eq!(flake_relative("/home/alice/nixos/pins.json"), None);
+    }
 }

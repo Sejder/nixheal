@@ -48,12 +48,25 @@ inputs.nixheal = {
 
   programs.nixheal = {
     enable = true;
-    pinsFile = ./pins.json;          # path to it in your flake; nixheal creates the file
+    pinsFile = ../../pins.json;      # the pins.json at the root of your flake; nixheal creates it
     flake = "/home/alice/nixos";     # the checkout nixheal updates
     hosts = [ "laptop" ];            # nixosConfigurations nixheal builds when it runs here
   };
 }
 ```
+
+Three things have to line up, and nixheal checks them before it builds
+anything:
+
+- **`pinsFile` is the `pins.json` at the root of the flake**, next to
+  `flake.lock`, written as a path (`./pins.json`, or `../../pins.json` from a
+  module in `hosts/laptop/`).
+- **`programs.nixheal.name` is the configuration's name**:
+  `nixosConfigurations.laptop` needs `name = "laptop"`. It defaults to
+  `networking.hostName` (Home Manager: `home.username`), so set it when those
+  differ.
+- **`programs.nixheal.input` is the flake input `pkgs` comes from**, as named in
+  `flake.lock`. The default is `nixpkgs`; set it if yours is called `nixos`.
 
 Switch once so the module is active, then update through nixheal instead of
 `nh os switch --update` or `nixos-rebuild switch --upgrade`:
@@ -77,22 +90,34 @@ programs.nixheal.autoUpgrade = {
 };
 ```
 
+The timer builds the checkout as it is, uncommitted changes included, so keep
+work in progress on a branch or out of the tree when it runs.
+
 ## Concepts
 
 **Pin.** A top-level package (an attribute of `pkgs`, or of another package set
 you register) taken from an older nixpkgs: the one in the last lock that
 built. nixheal walks up the derivation graph from a failed build to the
-packages your configuration uses directly and pins those, never a library on
-its own, so nothing has to be rebuilt from source.
+packages your configuration uses directly and pins those, not the library
+underneath. It never pins a package that more than 25 other packages in the
+system depend on: the pinned copy would replace it for all of them, and every
+one would rebuild from source. Such a failure holds the host instead.
 
 **Hold.** When a failure is not inside a pinnable package (configuration glue,
 a denylisted core package such as the kernel, glibc, systemd, nix, stdenv or
-gcc, or a package that fails at the old revision too), the host is held. On a
-machine you switch by hand, nixheal then gives up instead: it restores
-`flake.lock` and `pins.json`, commits nothing and switches nothing.
+gcc, a package too much depends on, or a package that fails at the old
+revision too), the host is held: it keeps the system it runs. The machine
+nixheal runs on is never held unless you pass `--hold-local`: nixheal gives up
+on it instead, for `build`, `switch`, `boot` and the timer alike. It restores
+`flake.lock` and `pins.json`, commits nothing and activates nothing.
 
-**Last good lock.** The lock nixheal last saw build, kept under
-`$XDG_STATE_HOME/nixheal`; the current `flake.lock` otherwise.
+**Infrastructure.** A build that cannot run on this machine at all (another
+platform, no builder, a timeout, out of memory) is not a broken package. nixheal
+stops the run without pinning or holding anything and restores the files.
+
+**Last good lock.** The lock a target last built with, kept per flake and
+target under `$XDG_STATE_HOME/nixheal`; the current `flake.lock` for a target
+that has not built yet.
 
 **Retry.** Each pin records the input revision it was last tried at. When that
 input moves, the pin is dropped for the next build; if the package builds, the
@@ -111,51 +136,78 @@ The verbs follow `nh` and `nixos-rebuild`:
 | `nixheal status [--json]` | pins and held hosts with their age |
 | `nixheal why <attr>` | the failed derivation, the path up to the pinned package, the end of the build log |
 | `nixheal pin <attr> [--input I]` | pin by hand at the current lock; kept until cleared |
-| `nixheal clear <attr>` / `--held` | remove a pin, or release a held host |
+| `nixheal clear <attr> [--input I]` / `--held` | remove a pin, or release a held host |
 | `nixheal merge <file>` | fold another `pins.json` in; per host, the entry from the newer lock wins |
+
+`why`, `pin` and `clear` act on this machine's entry, or on `--host NAME` /
+`--home NAME`. Every command takes `--config FILE` and `--flake DIR`.
 
 Options of `build`, `switch` and `boot`:
 
-- `--update [INPUT...]` runs `nix flake update` first, for all inputs or the named ones.
-- `--dry-run` shows what would be pinned and unpinned and changes nothing.
-- `--no-commit` leaves `flake.lock` and `pins.json` uncommitted.
-- `--only NAME` limits the run to some of the configured hosts and homes.
-- `--hold-local` holds this machine's own host like any other instead of giving up; for a machine that builds a whole fleet.
-- `--gc-roots DIR` keeps every system that built alive under `DIR/<host>` and `DIR/home-<name>`, e.g. for a binary cache.
-- `--built-link PATH` points a symlink at this machine's built system, and removes it when the build failed, so a separate step can activate it.
-- `-q`, `--quiet` prints only pins, unpins, holds, warnings and errors.
+| Option | |
+|---|---|
+| `--update [INPUT...]` | run `nix flake update` first, for all inputs or the named ones |
+| `--dry-run` | build as usual and show what would be pinned and unpinned, then leave every file as it was |
+| `--no-commit` | leave `flake.lock` and `pins.json` uncommitted |
+| `--only NAME` | build only some of the configured hosts and homes; repeatable |
+| `--hold-local` | hold this machine's own host like any other instead of giving up; for a machine that builds a fleet |
+| `--gc-roots DIR` | keep every system that built alive under `DIR/<host>` and `DIR/home-<name>`, e.g. for a binary cache |
+| `--built-link PATH` | a GC root pointing at this machine's built system, removed when it did not build, so a separate step can activate it |
+| `--old-lock FILE` | the lock to pin back to, instead of the last good one |
+| `--max-rounds N` | give up after N build rounds (8) |
+| `--max-new-pins N` | give up on a host that needs more than N new pins in one run (10) |
+| `--system SYSTEM` | the system for eval checks when a target's own cannot be evaluated |
+| `-q`, `--quiet` | print only pins, unpins, holds, warnings and errors |
 
 nixheal works in a dirty tree and only ever commits `flake.lock` and
-`pins.json`. On a terminal, builds are shown through nix-output-monitor.
+`pins.json`, without running git hooks or signing. A run takes a lock on the
+flake, so a timer run and a manual run cannot overlap, and Ctrl-C or SIGTERM
+puts both files back. On a terminal, builds are shown through
+nix-output-monitor.
+
+Exit codes: 0 when everything built or was held, 1 when nixheal gave up on this
+machine's own host, 2 on errors, 130 when interrupted. After a successful build,
+`switch` and `boot` return the exit code of the switcher.
+
+The settings come from `$NIXHEAL_CONFIG`, then `~/.config/nixheal.json`
+(Home Manager), then `/etc/nixheal.json` (NixOS), whichever exists first.
 
 ## Options
 
-`nixosModules.default` and `homeManagerModules.default` share these options
-under `programs.nixheal`:
+`nixosModules.default` and `homeManagerModules.default` (also exported as
+`homeModules.default`) share these options under `programs.nixheal`:
 
 | Option | Default | |
 |---|---|---|
 | `enable` | `false` | apply this machine's pins; install nixheal when `hosts` or `homes` is set |
-| `pinsFile` | `null` | the flake's `pins.json` (it may not exist yet) |
-| `flake` | `programs.nh.flake` | the checkout nixheal updates |
+| `pinsFile` | `null` | the `pins.json` at the root of the flake, as a path (it may not exist yet) |
+| `name` | host name / user name | this machine's entry in `pins.json`; must be its configuration's name |
+| `input` | `"nixpkgs"` | the flake input `pkgs` comes from |
+| `flake` | `programs.nh.flake` | the checkout nixheal updates (not a store path) |
 | `hosts`, `homes` | `[ ]` | `nixosConfigurations` / `homeConfigurations` nixheal builds when it runs here |
-| `name` | host name / user name | this machine's entry in `pins.json` |
-| `switcher` | `"nh"` | `"nh"`, or `"native"`: `nixos-rebuild` for hosts, `home-manager` for homes |
-| `warnAfterDays` | `14` | log a pin at warning level, and report it as stale, after this many days |
+| `switcher` | `"nh"` | `"nh"` (4.x, given the built system's store path), or `"native"`: `nixos-rebuild` (with `--sudo`, i.e. nixos-rebuild-ng) for hosts, `home-manager` for homes |
+| `warnAfterDays` | `14` | report a pin or hold as stale, and log it as a warning, after this many days |
 | `deny` | `[ ]` | attributes never to pin, on top of the built-in list; `cuda*` matches a prefix |
 | `quiet` | `false` | always run as `--quiet` |
-| `nixpkgs.<input>` | `{ }` | another nixpkgs to import with pins applied (see below) |
+| `package` | this flake's | the nixheal package |
+| `nixpkgs.<input>` | `{ }` | another nixpkgs to import with pins applied: `source`, `config` (default: this host's `nixpkgs.config`), `argName` |
+| `packageSets` | read-only | every package set nixheal pins on this machine, keyed by input |
 | `autoUpgrade.enable` | `false` | a timer that runs nixheal and activates the result |
 | `autoUpgrade.dates` | `"04:40"` | systemd calendar expression |
 | `autoUpgrade.randomizedDelaySec` | `"45min"` | |
 | `autoUpgrade.inputs` | `[ ]` | inputs to update; all when empty |
 | `autoUpgrade.commit` | `true` | commit after each run |
 | `autoUpgrade.operation` | `"switch"` | NixOS only: `"switch"` or `"boot"` |
-| `autoUpgrade.user` | `"root"` | NixOS only: who updates, builds and commits; use the checkout's owner |
+| `autoUpgrade.user` | (required) | NixOS only: the owner of the checkout, who updates, builds and commits |
 
 The settings are written to `/etc/nixheal.json` (NixOS) or
 `~/.config/nixheal.json` (Home Manager), so nixheal keeps working when the
 updated flake no longer evaluates.
+
+The pin overlay is added with `mkAfter` and replaces each pinned attribute with
+the old nixpkgs' copy, so your own overlays do not apply to a package while it
+is pinned. `lib.mkOverlay { pins, kind ? "hosts", name, input, nixpkgsConfig ? null }`
+is the overlay itself, for package sets the modules do not import.
 
 ### More package sets
 
@@ -170,12 +222,17 @@ programs.nixheal.nixpkgs.nixpkgs-unstable = {
 };
 ```
 
+`argName` cannot be a name modules already get, such as `pkgs` or `lib`.
+
 ### Home Manager
 
-Inside NixOS, the Home Manager module follows the host's settings. Standalone,
-it uses its own `homes` entry, and `nixheal switch` runs `nh home switch` (or
+Inside NixOS, the Home Manager module follows the host's settings and applies
+its pins; `hosts`, `homes` and `autoUpgrade` set there are ignored with a
+warning, so set them in the NixOS configuration. Standalone, it uses its own
+`homes` entry, and `nixheal switch` runs `nh home switch` (or
 `home-manager switch` with the native switcher). `autoUpgrade` there is a user
-timer that runs `nixheal switch --update`.
+timer that runs `nixheal switch --update`; it runs while you are logged in, or
+always with `loginctl enable-linger`.
 
 ## A fleet
 
@@ -187,7 +244,8 @@ the way a binary cache host would:
    A host that cannot be fixed is held; the others still get the new lock.
 2. Publish `flake.lock` and `pins.json` together (`pins.json` first). Each host
    entry carries the `lockSha256` it was computed for, so a consumer can refuse
-   a mismatched pair.
+   a mismatched pair. A held entry keeps the `lockSha256` of the lock it is held
+   on, so check `held` before comparing.
 3. On each machine, install both into its checkout before rebuilding. A machine
    whose entry is `held` should skip the update and stay on what it runs.
 4. Fold the published `pins.json` back into your repository with
@@ -207,9 +265,11 @@ homepage-dashboard `customapi` widget:
 ```
 
 `status` is the most urgent of `STALE` (a pin or hold older than
-`warnAfterDays`), `HELD`, `PINNED` and `OK`. `items` has one row per pin or held
-host for a `dynamic-list` widget, and a single `OK` row when nothing is
-pinned. Ages are computed when it runs, so regenerate it regularly.
+`warnAfterDays`), `HELD`, `PINNED` and `OK`. Manual pins never go stale. `items`
+has one row per pin or held host for a `dynamic-list` widget, and a single `OK`
+row when nothing is pinned; homes are named `home NAME`. Ages are in local days
+and computed when it runs, so regenerate it regularly. The text `status` marks
+the same pins and holds `STALE`.
 
 ## Limitations
 
@@ -250,14 +310,15 @@ pinned. Ages are computed when it runs, so regenerate it regularly.
 ```
 
 `locked` is the flake.lock node of the nixpkgs the package is taken from, so
-the overlay fetches it purely. Each run writes only the entries it built; when
-two runs disagree, the entry computed from the newer lock wins.
+the overlay fetches it purely. A run replaces the entries of the targets it
+built and leaves the others alone. `nixheal merge` combines two files: per
+target, the entry computed from the newer lock wins.
 
 ## Development
 
 ```
 cargo test             # unit tests
-nix flake check        # package, overlay and module checks
+nix flake check        # package, overlay, module and activation checks
 tests/e2e.sh           # a toy nixpkgs that breaks and heals, end to end
 ```
 

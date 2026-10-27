@@ -32,12 +32,21 @@ let
   ) cfg.nixpkgs;
 
   runsNixheal = !inNixos && (cfg.hosts != [ ] || cfg.homes != [ ]);
+  reservedArgs = [
+    "pkgs"
+    "lib"
+    "config"
+    "options"
+    "osConfig"
+    "specialArgs"
+  ];
 in
 {
   options.programs.nixheal = import ./options.nix {
     inherit lib self pkgs;
     defaultName = if inNixos then osConfig.networking.hostName else config.home.username;
     defaultEnable = osCfg.enable or false;
+    defaultInput = osCfg.input or "nixpkgs";
     defaultPinsFile = osCfg.pinsFile or null;
     defaultFlake = if nhFlake == null then null else toString nhFlake;
     defaultSetConfig = config.nixpkgs.config or { };
@@ -46,9 +55,12 @@ in
   config = lib.mkMerge [
     {
       programs.nixheal.packageSets = {
-        nixpkgs = pkgs;
+        ${cfg.input} = pkgs;
       }
       // extraSets;
+      warnings = lib.optional (
+        inNixos && (cfg.hosts != [ ] || cfg.homes != [ ] || cfg.autoUpgrade.enable)
+      ) "programs.nixheal.hosts, homes and autoUpgrade in Home Manager only apply to a standalone Home Manager; inside NixOS, set them in the NixOS configuration";
       _module.args = lib.mapAttrs' (input: set: lib.nameValuePair set.argName extraSets.${input}) (
         lib.filterAttrs (_: set: set.argName != null) cfg.nixpkgs
       );
@@ -59,8 +71,19 @@ in
           assertion = cfg.pinsFile != null;
           message = "programs.nixheal.pinsFile must point at the flake's pins.json";
         }
-      ];
-      nixpkgs.overlays = lib.mkAfter [ (overlay "nixpkgs" (config.nixpkgs.config or { })) ];
+        {
+          assertion =
+            cfg.pinsFile == null
+            || builtins.isPath cfg.pinsFile
+            || lib.hasPrefix "${builtins.storeDir}/" (toString cfg.pinsFile);
+          message = "programs.nixheal.pinsFile must be a path such as ./pins.json, not a string";
+        }
+      ]
+      ++ lib.mapAttrsToList (input: set: {
+        assertion = set.argName == null || !(builtins.elem set.argName reservedArgs);
+        message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
+      }) cfg.nixpkgs;
+      nixpkgs.overlays = lib.mkAfter [ (overlay cfg.input (config.nixpkgs.config or { })) ];
     })
     (lib.mkIf (cfg.enable && runsNixheal) {
       home.packages = [ cfg.package ];
@@ -76,7 +99,6 @@ in
           quiet
           switcher
           ;
-        inputs = builtins.attrNames cfg.packageSets;
       };
     })
     (lib.mkIf (cfg.enable && cfg.autoUpgrade.enable && runsNixheal) {
@@ -90,7 +112,6 @@ in
       systemd.user.services.nixheal-upgrade = {
         Unit = {
           Description = "Update the flake with nixheal and switch Home Manager";
-          After = [ "network-online.target" ];
         };
         Service = {
           Type = "oneshot";

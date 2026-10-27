@@ -214,14 +214,59 @@ impl PinsFile {
     }
 }
 
+/// Replace `path` with `bytes` in one rename. The temporary file gets a fresh
+/// name and is created exclusively, so a symlink planted in its place is never
+/// followed. A replaced file keeps its owner and mode, so root rewriting a
+/// user's flake.lock leaves it the user's.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.tmp"));
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    let before = std::fs::metadata(path).ok();
+    let mode = before
+        .as_ref()
+        .map_or(0o644, |m| m.permissions().mode() & 0o7777);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+
+    for attempt in 0..32 {
+        let tmp = path.with_file_name(format!(
+            ".{name}.{}.{nanos}.{attempt}.tmp",
+            std::process::id()
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", tmp.display())),
+        };
+        let written = file
+            .write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("writing {}", tmp.display()));
+        }
+        if let Some(m) = &before {
+            let _ = std::os::unix::fs::chown(&tmp, Some(m.uid()), Some(m.gid()));
+        }
+        return std::fs::rename(&tmp, path)
+            .with_context(|| format!("replacing {}", path.display()));
+    }
+    anyhow::bail!(
+        "could not create a temporary file next to {}",
+        path.display()
+    )
 }
 
 #[cfg(test)]
@@ -308,6 +353,27 @@ mod tests {
             f.entry(Kind::Nixos, "laptop").unwrap().lock_last_modified,
             7
         );
+    }
+
+    #[test]
+    fn write_atomic_keeps_mode_and_ignores_planted_temp_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("nixheal-wa-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("flake.lock");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let decoy = dir.join("decoy");
+        std::fs::write(&decoy, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&decoy, dir.join(".flake.lock.tmp")).unwrap();
+        write_atomic(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"untouched");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

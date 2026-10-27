@@ -16,6 +16,7 @@
       lib.mkOverlay = import ./nix/overlay.nix;
       nixosModules.default = import ./nix/module.nix self;
       homeManagerModules.default = import ./nix/hm-module.nix self;
+      homeModules.default = self.homeManagerModules.default;
 
       packages = forAllSystems (
         system:
@@ -143,6 +144,73 @@
           };
           settings = builtins.fromJSON machine.config.environment.etc."nixheal.json".text;
           upgrade = machine.config.systemd.services.nixheal-upgrade;
+
+          # Home Manager itself is not an input; these stand in for the few of
+          # its options the module uses.
+          hmStub =
+            { lib, ... }:
+            {
+              config._module.args.osConfig = lib.mkDefault null;
+              options = {
+                home.username = lib.mkOption { type = lib.types.str; };
+                home.profileDirectory = lib.mkOption {
+                  type = lib.types.str;
+                  default = "/home/alice/.nix-profile";
+                };
+                home.packages = lib.mkOption {
+                  type = lib.types.listOf lib.types.package;
+                  default = [ ];
+                };
+                xdg.configFile = lib.mkOption {
+                  type = lib.types.attrsOf (lib.types.submodule { options.text = lib.mkOption { type = lib.types.str; }; });
+                  default = { };
+                };
+                systemd.user.services = lib.mkOption {
+                  type = lib.types.attrsOf lib.types.raw;
+                  default = { };
+                };
+                systemd.user.timers = lib.mkOption {
+                  type = lib.types.attrsOf lib.types.raw;
+                  default = { };
+                };
+                nixpkgs.overlays = lib.mkOption {
+                  type = lib.types.listOf lib.types.raw;
+                  default = [ ];
+                };
+                nixpkgs.config = lib.mkOption {
+                  type = lib.types.attrs;
+                  default = { };
+                };
+                assertions = lib.mkOption {
+                  type = lib.types.listOf lib.types.raw;
+                  default = [ ];
+                };
+                warnings = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  default = [ ];
+                };
+              };
+            };
+          home = nixpkgs.lib.evalModules {
+            modules = [
+              hmStub
+              self.homeManagerModules.default
+              {
+                _module.args.pkgs = pkgs;
+                home.username = "alice";
+                programs.nixheal = {
+                  enable = true;
+                  pinsFile = pins;
+                  homes = [ "alice" ];
+                  flake = "/home/alice/nixos";
+                  autoUpgrade.enable = true;
+                };
+              }
+            ];
+          };
+          homeSettings = builtins.fromJSON home.config.xdg.configFile."nixheal.json".text;
+          homeUpgrade = home.config.systemd.user.services.nixheal-upgrade;
+          failedAssertions = cfg: builtins.filter (a: !a.assertion) cfg.assertions;
         in
         {
           package = self.packages.${system}.default;
@@ -183,9 +251,42 @@
             assert builtins.match ".*nixheal build --built-link /run/nixheal/system --update nixpkgs" upgrade.serviceConfig.ExecStart != null;
             assert builtins.match "[+]/nix/store/.*-nixheal-activate" upgrade.serviceConfig.ExecStartPost != null;
             assert machine.config.systemd.timers.nixheal-upgrade.timerConfig.OnCalendar == "04:40";
-            assert settings.inputs == [ "extra" "nixpkgs" ];
+            assert !(settings ? inputs);
+            assert machine.config.programs.nixheal.packageSets ? nixpkgs;
             assert builtins.elem machine.config.programs.nixheal.package machine.config.environment.systemPackages;
             pkgs.runCommand "nixheal-module-check" { } "touch $out";
+          activate-refuses =
+            let
+              script = nixpkgs.lib.removePrefix "+" machine.config.systemd.services.nixheal-upgrade.serviceConfig.ExecStartPost;
+            in
+            pkgs.runCommand "nixheal-activate-check" { } ''
+              mkdir -p fake/bin
+              ln -s "$PWD/fake" outside
+              if NIXHEAL_BUILT_LINK="$PWD/outside" ${script} 2>err; then
+                echo "activated a system outside the store"; exit 1
+              fi
+              grep -q "not in /nix/store" err
+              ln -s ${pkgs.hello} notnixos
+              if NIXHEAL_BUILT_LINK="$PWD/notnixos" ${script} 2>err; then
+                echo "activated a store path that is not a NixOS system"; exit 1
+              fi
+              grep -q "not a NixOS system" err
+              NIXHEAL_BUILT_LINK="$PWD/missing" ${script}
+              touch $out
+            '';
+          home-module =
+            assert failedAssertions home.config == [ ];
+            assert home.config.programs.nixheal.name == "alice";
+            assert homeSettings.kind == "home";
+            assert homeSettings.self == "alice";
+            assert homeSettings.homes == [ "alice" ];
+            assert builtins.length home.config.nixpkgs.overlays == 1;
+            assert home.config.programs.nixheal.packageSets ? nixpkgs;
+            assert builtins.match ".*nixheal switch --update" homeUpgrade.Service.ExecStart != null;
+            assert !(homeUpgrade.Unit ? After);
+            assert home.config.systemd.user.timers.nixheal-upgrade.Timer.OnCalendar == "04:40";
+            assert builtins.elem home.config.programs.nixheal.package home.config.home.packages;
+            pkgs.runCommand "nixheal-home-module-check" { } "touch $out";
         }
       );
     };

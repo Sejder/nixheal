@@ -2,10 +2,11 @@ use crate::config::{self, Config, Target};
 use crate::date;
 use crate::engine::{self, Engine};
 use crate::git::Git;
+use crate::guard;
 use crate::lock::Lock;
 use crate::log;
 use crate::nix::{self, Nix};
-use crate::pins::{Kind, Pin, PinsFile, Reason, write_atomic};
+use crate::pins::{Kind, Pin, PinsFile, Reason};
 use crate::state;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -128,8 +129,10 @@ impl Ctx {
 }
 
 /// Create the pins file when missing and make sure a git flake can see it.
-fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<()> {
-    if !path.exists() {
+/// Returns whether it created the file.
+fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<bool> {
+    let created = !path.exists();
+    if created {
         PinsFile::default().save(path)?;
         log::info(&format!("created {}", path.display()));
     }
@@ -142,7 +145,7 @@ fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<()> {
             path.display()
         ));
     }
-    Ok(())
+    Ok(created)
 }
 
 fn is_root() -> bool {
@@ -212,65 +215,121 @@ fn activate(
     })
 }
 
-/// Point `link` at the built system, replacing whatever was there.
-fn set_built_link(link: &Path, target: Option<&str>) -> Result<()> {
+fn remove_link(link: &Path) -> Result<()> {
     match std::fs::remove_file(link) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(e).with_context(|| format!("removing {}", link.display()));
+            Err(e).with_context(|| format!("removing {}", link.display()))
         }
-        _ => {}
+        _ => Ok(()),
     }
-    if let Some(target) = target {
-        std::os::unix::fs::symlink(target, link)
-            .with_context(|| format!("linking {}", link.display()))?;
+}
+
+/// Refuse setups where a run would do damage: running as root in a checkout
+/// someone else owns, or a flake that is a store path and cannot be written.
+fn check_flake(flake: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if flake.starts_with("/nix/store") {
+        bail!(
+            "{} is in the nix store; point programs.nixheal.flake (or --flake) at your checkout",
+            flake.display()
+        );
+    }
+    let owner = std::fs::metadata(flake)
+        .with_context(|| format!("reading {}", flake.display()))?
+        .uid();
+    if is_root() && owner != 0 {
+        bail!(
+            "{} belongs to uid {owner}; run nixheal as that user, or as root it would leave root-owned files and git objects there (for the timer, set programs.nixheal.autoUpgrade.user)",
+            flake.display()
+        );
     }
     Ok(())
 }
 
 pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
-    if let Some(link) = &args.built_link {
-        set_built_link(link, None)?;
-    }
     let update = args.update.as_deref();
     let ctx = Ctx::open(&args.at, true)?;
     let cfg = ctx.config.clone().expect("config required");
     let mut targets = cfg.targets();
     if !args.only.is_empty() {
+        let unknown: Vec<&String> = args
+            .only
+            .iter()
+            .filter(|n| !targets.iter().any(|t| &t.name == *n))
+            .collect();
+        if !unknown.is_empty() {
+            let known: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+            bail!(
+                "--only {} is not among the configured hosts and homes ({})",
+                unknown
+                    .iter()
+                    .map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                known.join(", ")
+            );
+        }
         targets.retain(|t| args.only.contains(&t.name));
     }
     if targets.is_empty() {
         bail!("no hosts or homes to build: set programs.nixheal.hosts or homes");
     }
     let local = Some(cfg.local()).filter(|l| targets.contains(l));
+    if how == Activation::Boot && local.as_ref().is_some_and(|l| l.kind == Kind::Home) {
+        bail!("Home Manager has no boot activation; use nixheal switch");
+    }
     // The machine's own host is given up on, not held, unless it builds a
     // fleet: holding it would leave it running an old system unnoticed.
     let guarded = local.clone().filter(|_| !args.hold_local);
 
+    check_flake(&ctx.flake)?;
+    let _run_lock = guard::lock_flake(&ctx.flake)?;
+    if !args.dry_run
+        && let Some(link) = &args.built_link
+    {
+        remove_link(link)?;
+    }
+
     let git = Git::open(&ctx.flake);
     let pins_path = ctx.pins_path();
     let lock_path = ctx.flake.join("flake.lock");
-    ensure_pins(&pins_path, git.as_ref())?;
     let orig_lock =
         std::fs::read(&lock_path).with_context(|| format!("reading {}", lock_path.display()))?;
-    let orig_pins = std::fs::read(&pins_path)?;
-    let restore = || -> Result<()> {
-        write_atomic(&lock_path, &orig_lock)?;
-        write_atomic(&pins_path, &orig_pins)
+    let created_pins = ensure_pins(&pins_path, git.as_ref())?;
+    let orig_pins = if created_pins {
+        None
+    } else {
+        Some(std::fs::read(&pins_path)?)
     };
+    guard::arm(guard::Restore {
+        lock_path: lock_path.clone(),
+        lock: orig_lock.clone(),
+        pins_path: pins_path.clone(),
+        pins: orig_pins,
+        flake: ctx.flake.clone(),
+    });
 
+    let mut last_good = std::collections::HashMap::new();
     let old_lock = match &args.old_lock {
         Some(p) => Lock::load(p)?,
-        None => match state::load_last_good(&ctx.flake) {
-            Some(l) => l,
-            None => Lock::from_bytes(orig_lock.clone())?,
-        },
+        None => {
+            for t in &targets {
+                if let Some(l) = state::load_last_good(&ctx.flake, Some(t)) {
+                    last_good.insert(t.clone(), l);
+                }
+            }
+            match state::load_last_good(&ctx.flake, None) {
+                Some(l) => l,
+                None => Lock::from_bytes(orig_lock.clone())?,
+            }
+        }
     };
 
     let nix = Nix::new(&ctx.flake);
     if let Some(inputs) = update
         && let Err(e) = nix.flake_update(inputs)
     {
-        restore()?;
+        guard::restore()?;
         return Err(e);
     }
 
@@ -279,8 +338,10 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         pins_path: pins_path.clone(),
         new_lock: Lock::load(&lock_path)?,
         old_lock,
+        last_good,
         targets,
         local: guarded,
+        local_target: local.clone(),
         fallback_inputs: cfg.inputs.clone(),
         deny: cfg.deny.clone(),
         system: args.system.clone(),
@@ -292,20 +353,20 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
     let report = match engine.run() {
         Ok(r) => r,
         Err(e) => {
-            restore()?;
+            guard::restore()?;
             return Err(e);
         }
     };
 
     if let Some(why) = &report.local_failure {
-        restore()?;
-        log::change(&format!("not switching: {why}"));
+        guard::restore()?;
+        log::change(&format!("not activating: {why}"));
         log::change("restored flake.lock and pins.json; nothing was committed");
         return Ok(ExitCode::from(1));
     }
 
     if args.dry_run {
-        restore()?;
+        guard::restore()?;
         if report.changes.is_empty() {
             log::change("dry run: no pins would change");
         }
@@ -314,8 +375,6 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     }
-
-    state::save_last_good(&ctx.flake, &engine.new_lock)?;
 
     if let Some(dir) = &args.gc_roots {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -346,6 +405,15 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
             log::info(&format!("committed {title:?}"));
         }
     }
+    guard::disarm();
+
+    // Only now, with the results committed, are these locks known to build.
+    for (target, _) in &report.built {
+        state::save_last_good(&ctx.flake, Some(target), &engine.new_lock)?;
+    }
+    if !report.built.is_empty() {
+        state::save_last_good(&ctx.flake, None, &engine.new_lock)?;
+    }
 
     let built = match report.local_drv.as_deref().map(nix::out_path) {
         Some(Ok(path)) => Some(path),
@@ -355,11 +423,17 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         }
         None => None,
     };
-    if let Some(link) = &args.built_link {
-        set_built_link(link, built.as_deref())?;
+    if let (Some(link), Some(drv)) = (&args.built_link, &report.local_drv) {
+        nix::add_root(drv, link)?;
     }
 
     match &local {
+        Some(target) if report.local_held => {
+            if how != Activation::None {
+                log::change(&format!("not activating: {target} is held"));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Some(target) => activate(target, &ctx.flake, built.as_deref(), how, &cfg.switcher),
         None if how != Activation::None => {
             log::info(&format!(
@@ -419,18 +493,27 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
     let mut any = false;
     for (kind, name, entry) in file.entries() {
         let target = Target::new(kind, name);
+        let stale = |since: &str, manual: bool| {
+            let age = date::parse(since).map(|d| today - d);
+            let flag = if !manual && age.is_none_or(|a| a > warn) {
+                "  STALE"
+            } else {
+                ""
+            };
+            (age.map_or("?".into(), |a| a.to_string()), flag)
+        };
         if let Some(h) = &entry.held {
             any = true;
-            println!("{target}\tHELD since {}: {}", h.since, h.reason);
+            let (age, flag) = stale(&h.since, false);
+            println!(
+                "{target}\theld\tsince {} ({age}d){flag}\t{}",
+                h.since, h.reason
+            );
         }
         for (input, attr, pin) in entry.iter() {
             any = true;
             let age = date::parse(&pin.since).map(|d| today - d);
-            let flag = if age.is_some_and(|a| a > warn) {
-                "  OLD"
-            } else {
-                ""
-            };
+            let (_, flag) = stale(&pin.since, pin.reason == Reason::Manual);
             println!(
                 "{target}\t{input}.{attr}\t{}\tsince {} ({}d){flag}",
                 pin.reason.as_str(),
@@ -491,6 +574,15 @@ pub fn pin(pick: &Pick, attr: &str, input: &str) -> Result<ExitCode> {
         bail!("{input} is not an input of flake.lock");
     };
     let checked = lock.nar_hash(input).unwrap_or_default();
+    let system = Nix::new(&ctx.flake)
+        .eval_raw(&target.system_attr())
+        .unwrap_or_else(|_| default_system());
+    if !crate::resolve::evaluates_at(&locked, &system, attr)? {
+        bail!(
+            "{attr} is not a package in {input} at {}; nothing was pinned",
+            engine::describe(&locked)
+        );
+    }
     let pins_path = ctx.pins_path();
     ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
     let mut file = PinsFile::load(&pins_path)?;

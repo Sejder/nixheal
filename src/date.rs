@@ -1,6 +1,16 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Today in local time, as days since 1970-01-01; UTC when `date` is missing.
 pub fn today() -> i64 {
+    let local = std::process::Command::new("date")
+        .arg("+%Y-%m-%d")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| parse(String::from_utf8_lossy(&o.stdout).trim()));
+    if let Some(days) = local {
+        return days;
+    }
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

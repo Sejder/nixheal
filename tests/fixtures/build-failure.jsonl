@@ -1,6 +1,6 @@
 @nix {"action":"start","id":902218010066944,"level":6,"parent":0,"text":"querying info about missing paths","type":0}
-@nix {"action":"start","fields":["/nix/store/x6r0f31nmspjg22j2j09xrk2qw5249ag-app-3.0","https://cache.sejder.dev"],"id":902218010066945,"level":4,"parent":0,"text":"querying info about '/nix/store/x6r0f31nmspjg22j2j09xrk2qw5249ag-app-3.0' on 'https://cache.sejder.dev'","type":109}
-@nix {"action":"start","fields":["https://cache.sejder.dev/x6r0f31nmspjg22j2j09xrk2qw5249ag.narinfo"],"id":902218010066946,"level":4,"parent":902218010066945,"text":"downloading 'https://cache.sejder.dev/x6r0f31nmspjg22j2j09xrk2qw5249ag.narinfo'","type":101}
+@nix {"action":"start","fields":["/nix/store/x6r0f31nmspjg22j2j09xrk2qw5249ag-app-3.0","https://cache.example.org"],"id":902218010066945,"level":4,"parent":0,"text":"querying info about '/nix/store/x6r0f31nmspjg22j2j09xrk2qw5249ag-app-3.0' on 'https://cache.example.org'","type":109}
+@nix {"action":"start","fields":["https://cache.example.org/x6r0f31nmspjg22j2j09xrk2qw5249ag.narinfo"],"id":902218010066946,"level":4,"parent":902218010066945,"text":"downloading 'https://cache.example.org/x6r0f31nmspjg22j2j09xrk2qw5249ag.narinfo'","type":101}
 @nix {"action":"result","fields":[0,0,0,0],"id":902218010066946,"type":105}
 @nix {"action":"result","fields":[0,0,0,0],"id":902218010066946,"type":105}
 @nix {"action":"result","fields":[0,0,0,0],"id":902218010066946,"type":105}
@@ -35,8 +35,8 @@
 @nix {"action":"result","fields":[3,3,0,0],"id":902218010066948,"type":105}
 @nix {"action":"stop","id":902218010066947}
 @nix {"action":"stop","id":902218010066948}
-@nix {"action":"start","fields":["/nix/store/4k1gy0bhxvfkb6x70szz3n05j5aswbkp-libfoo-1.2","https://cache.sejder.dev"],"id":902218010066949,"level":4,"parent":0,"text":"querying info about '/nix/store/4k1gy0bhxvfkb6x70szz3n05j5aswbkp-libfoo-1.2' on 'https://cache.sejder.dev'","type":109}
-@nix {"action":"start","fields":["https://cache.sejder.dev/4k1gy0bhxvfkb6x70szz3n05j5aswbkp.narinfo"],"id":902218010066950,"level":4,"parent":902218010066949,"text":"downloading 'https://cache.sejder.dev/4k1gy0bhxvfkb6x70szz3n05j5aswbkp.narinfo'","type":101}
+@nix {"action":"start","fields":["/nix/store/4k1gy0bhxvfkb6x70szz3n05j5aswbkp-libfoo-1.2","https://cache.example.org"],"id":902218010066949,"level":4,"parent":0,"text":"querying info about '/nix/store/4k1gy0bhxvfkb6x70szz3n05j5aswbkp-libfoo-1.2' on 'https://cache.example.org'","type":109}
+@nix {"action":"start","fields":["https://cache.example.org/4k1gy0bhxvfkb6x70szz3n05j5aswbkp.narinfo"],"id":902218010066950,"level":4,"parent":902218010066949,"text":"downloading 'https://cache.example.org/4k1gy0bhxvfkb6x70szz3n05j5aswbkp.narinfo'","type":101}
 @nix {"action":"result","fields":[0,0,0,0],"id":902218010066950,"type":105}
 @nix {"action":"result","fields":[0,0,0,0],"id":902218010066950,"type":105}
 @nix {"action":"result","fields":[0,0,0,0],"id":902218010066950,"type":105}

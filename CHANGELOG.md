@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.1.1
+
+Fixes from an independent review of 0.1.0.
+
+Setups where pins silently never applied are now caught before anything
+builds, with an error saying what to change:
+
+- `programs.nixheal.name` must be the configuration's name: a host whose name
+  differs (for example `networking.hostName = "alice-laptop"` on
+  `nixosConfigurations.laptop`, or `homeConfigurations."alice@laptop"`) wrote
+  its pins under one name and read them under another.
+- `pinsFile` must be the `pins.json` at the flake root, where nixheal writes
+  it, and a path rather than a string.
+- `programs.nixheal.enable` must be on in every target.
+- New `programs.nixheal.input`, for a main nixpkgs input not called `nixpkgs`.
+
+Bugs:
+
+- Fixed-output hash mismatches are recognised as build failures, so a broken download
+  is pinned instead of failing every host in the round. Only hosts whose own
+  build failed are affected by an unrecognised failure.
+- Builds that cannot run here (another platform, no builder, a timeout, out of
+  memory) stop the run without pinning or holding anything.
+- `switch` and `boot` with `--hold-local` no longer activate a held local host.
+- Each target uses its own package sets, read from its configuration, instead
+  of the running machine's.
+- The last good lock is kept per target, and saved only after the commit.
+- A run writes the entries it built, instead of keeping a stale entry when the
+  lock moved backwards.
+- A run takes a lock on the flake, and Ctrl-C or SIGTERM restores `flake.lock`
+  and `pins.json`.
+- `--dry-run` leaves `--built-link` and a fresh checkout alone.
+- `boot` on a Home Manager configuration is refused before building.
+- `--only` with an unknown name is an error.
+- `nixheal pin` checks that the package exists.
+- Host names are quoted in attribute paths.
+- Packages more than 25 others depend on are no longer pinned, since that
+  rebuilt all of them from source; the host is held instead.
+
+Safety:
+
+- `autoUpgrade.user` is required, and nixheal refuses to run as root in a
+  checkout another user owns, which left root-owned files there. Files are
+  written through exclusively created temporary files that keep the original
+  owner and mode, so a planted symlink is never followed.
+- Commits skip git hooks and signing, so a hook or a GPG prompt cannot stall
+  the timer. When git refuses a repository, nixheal says so.
+- The root activation step only activates a NixOS system in the store, and
+  `--built-link` is a GC root.
+- The NixOS timer has ssh available for `git+ssh` inputs; the Home Manager
+  timer drops a dependency the user manager cannot satisfy.
+- `argName` cannot shadow a module argument such as `pkgs`.
+- Home Manager inside NixOS warns when `hosts`, `homes` or `autoUpgrade` are
+  set there, since they only apply standalone.
+- A flake path inside the Nix store is refused.
+
+Smaller changes:
+
+- `homeModules.default` is exported next to `homeManagerModules.default`.
+- `status` marks old pins and holds `STALE`, as the JSON does, and manual pins
+  never go stale. Homes are named `home NAME` in the summary. Dates are local.
+- The README documents every flag, the exit codes, the config lookup order, the
+  three requirements above and the overlay's precedence.
+- Tests cover the Home Manager module, the activation step, the new log
+  formats, the probes, the dry run, holds without activation and interruption.
+  CI lints test code too.
+
 ## 0.1.0
 
 First public release.

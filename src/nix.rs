@@ -220,11 +220,6 @@ impl Nix {
         let bytes = checked(&format!("nix eval {attr}"), out)?;
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
-
-    pub fn attr_names(&self, attr: &str) -> Result<Vec<String>> {
-        let v = self.eval_apply(attr, "builtins.attrNames")?;
-        Ok(serde_json::from_value(v)?)
-    }
 }
 
 /// Keep a built derivation alive with a GC root at `link`.

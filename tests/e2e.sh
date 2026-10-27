@@ -81,16 +81,18 @@ expect_built() {
 }
 
 write_config() {
+  local hosts='"a", "b"'
+  [ -n "${3:-}" ] && hosts="$3"
   cat >"$config" <<EOF
-{ "kind": "nixos", "self": "a", "flake": "$sys", "hosts": ["a", "b"], "homes": [],
-  "inputs": ["toypkgs"], "warnAfterDays": 14, "deny": [$1]${2:+, $2} }
+{ "kind": "nixos", "self": "a", "flake": "$sys", "hosts": [$hosts], "homes": [],
+  "warnAfterDays": 14, "deny": [$1]${2:+, $2} }
 EOF
 }
 
 write_home_config() {
   cat >"$config" <<EOF
 { "kind": "home", "self": "alice", "flake": "$sys", "hosts": [], "homes": ["alice"],
-  "inputs": ["toypkgs"], "warnAfterDays": 14, "deny": [] }
+  "warnAfterDays": 14, "deny": [] }
 EOF
 }
 
@@ -135,7 +137,9 @@ let
     );
     app = mk "app-2.0" "app" [ self.libfoo ] "echo app $deps > $out";
     hello = mk "hello-${state.hello}" "hello" [ ] (
-      if state.hello == "broken" then broken "hello" else "echo hello > $out"
+      if state.hello == "broken" then broken "hello"
+      else if state.hello == "slow" then "i=0; while [ $i -lt 30000000 ]; do i=$((i + 1)); done; echo hello > $out"
+      else "echo hello > $out"
     );
     linux = mk "linux-6.0" "linux" [ ] (
       if state.linux == "broken" then broken "linux" else "echo linux-${state.linux} > $out"
@@ -155,8 +159,8 @@ cat >"$sys/flake.nix" <<EOF
   outputs = { self, toypkgs }:
     let
       system = "$system";
-      mkHost = name: paths: mkHostOf "hosts" name paths;
-      mkHostOf = kind: name: paths:
+      mkHost = name: paths: mkHostOf "hosts" name paths { };
+      mkHostOf = kind: name: paths: settings:
         let
           pkgs = import toypkgs {
             inherit system;
@@ -170,7 +174,12 @@ cat >"$sys/flake.nix" <<EOF
             paths = paths pkgs;
           };
         in rec {
-          config.programs.nixheal.packageSets.toypkgs = pkgs;
+          config.programs.nixheal = {
+            enable = true;
+            inherit name;
+            pinsFile = ./pins.json;
+            packageSets.toypkgs = pkgs;
+          } // settings;
           activationPackage = config.system.build.toplevel;
           config.system.build.toplevel = derivation {
             name = "toplevel-\${name}";
@@ -183,7 +192,9 @@ cat >"$sys/flake.nix" <<EOF
     in {
       nixosConfigurations.a = mkHost "a" (p: [ p.hello p.gone ]);
       nixosConfigurations.b = mkHost "b" (p: [ p.app p.hello p.linux ]);
-      homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]);
+      homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]) { };
+      nixosConfigurations.misnamed = mkHostOf "hosts" "misnamed" (p: [ p.hello ]) { name = "other"; };
+      nixosConfigurations.elsewhere = mkHostOf "hosts" "elsewhere" (p: [ p.hello ]) { pinsFile = ./sub/pins.json; };
     };
 }
 EOF
@@ -254,7 +265,7 @@ r3_rev="$(nix eval --raw --impure --expr "(builtins.fromJSON (builtins.readFile 
 [ "$held_rev" = "$r3_rev" ] || fail "b is held on $held_rev, expected the r3 lock $r3_rev"
 expect_built a hello-4
 nixheal_ status || fail "nixheal status failed"
-expect_log "host b	HELD since"
+expect_log "host b	held	since"
 
 step "r5: linux is fixed and gone is back: b is released, a unpins"
 revision fixed false 5 ok
@@ -385,6 +396,70 @@ want_home="$(nix eval --raw "$sys#homeConfigurations.alice.activationPackage.out
 expect_log "home alice builds"
 if nixheal_ boot; then fail "boot should refuse a home"; fi
 expect_log "Home Manager has no boot activation"
+reject_log "round 1"
 write_config ""
+
+step "probe: hosts whose pins could never apply are refused before anything builds"
+write_config "" "" '"misnamed"'
+if nixheal_ build; then fail "a misnamed host should be refused"; fi
+expect_log 'has programs.nixheal.name = "other"; it must be "misnamed"'
+reject_log "round 1"
+write_config "" "" '"elsewhere"'
+if nixheal_ build; then fail "a pinsFile outside the flake root should be refused"; fi
+expect_log "pinsFile = sub/pins.json; it must be pins.json at the flake root"
+reject_log "round 1"
+write_config ""
+
+step "--only: an unknown name is an error, not a silent no-op"
+if nixheal_ build --only nope; then fail "--only nope should fail"; fi
+expect_log "--only nope is not among the configured hosts and homes (a, b)"
+
+step "dry run on a fresh checkout: pins.json is created for the build and removed again, --built-link is left alone"
+cp "$sys/pins.json" "$work/pins.keep"
+git -C "$sys" rm -q pins.json
+git -C "$sys" commit -qm "no pins.json"
+ln -sfn /nonexistent "$work/keep"
+nixheal_ build --dry-run --built-link "$work/keep" || fail "the dry run on a fresh checkout failed"
+[ -e "$sys/pins.json" ] && fail "the dry run left pins.json behind"
+git -C "$sys" ls-files --error-unmatch pins.json >/dev/null 2>&1 && fail "the dry run left pins.json in the index"
+[ "$(readlink "$work/keep")" = /nonexistent ] || fail "the dry run touched --built-link"
+cp "$work/pins.keep" "$sys/pins.json"
+git -C "$sys" add pins.json
+git -C "$sys" commit -qm "pins.json again"
+
+step "switch --hold-local: a held local host is not activated"
+write_config '"hello"'
+revision fixed false broken ok
+before_calls="$(nh_calls)"
+nixheal_ switch --update --hold-local --no-commit || fail "switch --hold-local gave up"
+expect_log "held host a on its last good lock"
+expect_log "not activating: host a is held"
+[ "$(nh_calls)" = "$before_calls" ] || fail "a held local host was activated"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
+
+step "interrupted: SIGTERM during the build restores flake.lock and pins.json"
+revision fixed false slow ok
+cp "$sys/flake.lock" "$work/before.lock"
+cp "$sys/pins.json" "$work/before.json"
+"$nixheal" switch --update --config "$config" >"$work/stdout" 2>"$log" &
+pid=$!
+for _ in $(seq 60); do
+  grep -q "round 1" "$log" && break
+  sleep 0.5
+done
+grep -q "round 1" "$log" || fail "the slow build never started"
+sleep 2
+kill -TERM "$pid"
+set +e
+wait "$pid"
+rc=$?
+set -e
+[ "$rc" = 130 ] || fail "an interrupted run should exit 130, not $rc"
+expect_log "interrupted; restored flake.lock and pins.json"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored after SIGTERM"
+cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored after SIGTERM"
+revision fixed false 10 ok
+nixheal_ build --update || fail "nixheal build gave up after the interrupted run"
 
 printf '\nall e2e steps passed\n'

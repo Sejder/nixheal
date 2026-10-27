@@ -1,3 +1,4 @@
+use crate::config::Target;
 use crate::lock::Lock;
 use crate::pins::write_atomic;
 use anyhow::{Context, Result};
@@ -11,26 +12,53 @@ fn state_dir() -> Option<PathBuf> {
         .map(|d| d.join("nixheal"))
 }
 
-/// Where the last lock that built for `flake` is kept, one file per flake.
-fn last_good_path(flake: &Path) -> Option<PathBuf> {
-    let key: String = Sha256::digest(flake.to_string_lossy().as_bytes())
+fn key(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
         .iter()
         .take(8)
         .map(|b| format!("{b:02x}"))
-        .collect();
-    Some(state_dir()?.join(format!("last-good-{key}.lock")))
+        .collect()
 }
 
-pub fn load_last_good(flake: &Path) -> Option<Lock> {
-    Lock::load(&last_good_path(flake)?).ok()
+/// Where the last lock that built is kept: one file per flake and target, and
+/// one per flake for targets that have not built yet.
+fn last_good_path(flake: &Path, target: Option<&Target>) -> Option<PathBuf> {
+    let flake = flake.to_string_lossy();
+    let name = match target {
+        Some(t) => format!("last-good-{}.lock", key(&format!("{flake}\0{t}"))),
+        None => format!("last-good-{}.lock", key(&flake)),
+    };
+    Some(state_dir()?.join(name))
 }
 
-pub fn save_last_good(flake: &Path, lock: &Lock) -> Result<()> {
-    let Some(path) = last_good_path(flake) else {
+pub fn load_last_good(flake: &Path, target: Option<&Target>) -> Option<Lock> {
+    Lock::load(&last_good_path(flake, target)?).ok()
+}
+
+pub fn save_last_good(flake: &Path, target: Option<&Target>, lock: &Lock) -> Result<()> {
+    let Some(path) = last_good_path(flake, target) else {
         return Ok(());
     };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     write_atomic(&path, lock.bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pins::Kind;
+
+    #[test]
+    fn one_file_per_target() {
+        let flake = Path::new("/home/alice/nixos");
+        let a = last_good_path(flake, Some(&Target::new(Kind::Nixos, "a")));
+        let b = last_good_path(flake, Some(&Target::new(Kind::Nixos, "b")));
+        let home = last_good_path(flake, Some(&Target::new(Kind::Home, "a")));
+        let any = last_good_path(flake, None);
+        assert_ne!(a, b);
+        assert_ne!(a, home);
+        assert_ne!(a, any);
+    }
 }

@@ -28,13 +28,30 @@ let
   ) cfg.nixpkgs;
 
   runsNixheal = cfg.hosts != [ ] || cfg.homes != [ ];
+  reservedArgs = [
+    "pkgs"
+    "lib"
+    "config"
+    "options"
+    "modulesPath"
+    "specialArgs"
+  ];
 
   up = cfg.autoUpgrade;
   builtLink = "/run/nixheal/system";
   activateScript = pkgs.writeShellScript "nixheal-activate" ''
     set -eu
-    [ -L ${builtLink} ] || exit 0
-    system="$(${pkgs.coreutils}/bin/readlink -f ${builtLink})"
+    link="''${NIXHEAL_BUILT_LINK:-${builtLink}}"
+    [ -L "$link" ] || exit 0
+    system="$(${pkgs.coreutils}/bin/readlink -f "$link")"
+    case "$system" in
+      ${builtins.storeDir}/*) ;;
+      *) echo "refusing to activate $system: not in ${builtins.storeDir}" >&2; exit 1 ;;
+    esac
+    if [ ! -x "$system/bin/switch-to-configuration" ]; then
+      echo "refusing to activate $system: it is not a NixOS system" >&2
+      exit 1
+    fi
     if [ "${up.operation}" = switch ] && [ "$system" = "$(${pkgs.coreutils}/bin/readlink -f /run/current-system)" ]; then
       echo "already running $system"
       exit 0
@@ -65,10 +82,10 @@ in
             description = "Activate the new system right away, or on the next boot.";
           };
           user = lib.mkOption {
-            type = lib.types.str;
-            default = "root";
+            type = lib.types.nullOr lib.types.str;
+            default = null;
             example = "alice";
-            description = "Who updates, builds and commits. Use the owner of the flake checkout, so its files and git objects stay theirs; activation always runs as root.";
+            description = "Who updates, builds and commits: the owner of the flake checkout, so its files and git objects stay theirs. Activation always runs as root.";
           };
         };
       };
@@ -76,7 +93,7 @@ in
   config = lib.mkMerge [
     {
       programs.nixheal.packageSets = {
-        nixpkgs = pkgs;
+        ${cfg.input} = pkgs;
       }
       // extraSets;
       _module.args = lib.mapAttrs' (input: set: lib.nameValuePair set.argName extraSets.${input}) (
@@ -89,8 +106,19 @@ in
           assertion = cfg.pinsFile != null;
           message = "programs.nixheal.pinsFile must point at the flake's pins.json";
         }
-      ];
-      nixpkgs.overlays = lib.mkAfter [ (overlay "nixpkgs" config.nixpkgs.config) ];
+        {
+          assertion =
+            cfg.pinsFile == null
+            || builtins.isPath cfg.pinsFile
+            || lib.hasPrefix "${builtins.storeDir}/" (toString cfg.pinsFile);
+          message = "programs.nixheal.pinsFile must be a path such as ./pins.json, not a string";
+        }
+      ]
+      ++ lib.mapAttrsToList (input: set: {
+        assertion = set.argName == null || !(builtins.elem set.argName reservedArgs);
+        message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
+      }) cfg.nixpkgs;
+      nixpkgs.overlays = lib.mkAfter [ (overlay cfg.input config.nixpkgs.config) ];
     })
     (lib.mkIf (cfg.enable && runsNixheal) {
       environment.systemPackages = [ cfg.package ];
@@ -106,7 +134,6 @@ in
           quiet
           switcher
           ;
-        inputs = builtins.attrNames cfg.packageSets;
       };
     })
     (lib.mkIf (cfg.enable && up.enable) {
@@ -118,6 +145,10 @@ in
         {
           assertion = cfg.flake != null;
           message = "programs.nixheal.autoUpgrade needs programs.nixheal.flake";
+        }
+        {
+          assertion = up.user != null;
+          message = "programs.nixheal.autoUpgrade.user must be set to the owner of ${toString cfg.flake}";
         }
       ];
       warnings = lib.optional config.system.autoUpgrade.enable "programs.nixheal.autoUpgrade and system.autoUpgrade both update this host; disable one";
@@ -133,6 +164,7 @@ in
           config.nix.package
           pkgs.git
           pkgs.coreutils
+          config.programs.ssh.package
         ];
         environment = lib.mkIf (up.user == "root") {
           GIT_AUTHOR_NAME = "nixheal";

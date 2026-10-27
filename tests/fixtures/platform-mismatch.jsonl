@@ -1,0 +1,57 @@
+@nix {"action":"start","id":313597037117440,"level":6,"parent":0,"text":"querying info about missing paths","type":0}
+@nix {"action":"start","fields":["/nix/store/gccsfnz4plpnxcn44f72rvnsaijbqnpm-foreign-1.0","https://cache.example.org"],"id":313597037117441,"level":4,"parent":0,"text":"querying info about '/nix/store/gccsfnz4plpnxcn44f72rvnsaijbqnpm-foreign-1.0' on 'https://cache.example.org'","type":109}
+@nix {"action":"start","fields":["https://cache.example.org/gccsfnz4plpnxcn44f72rvnsaijbqnpm.narinfo"],"id":313597037117442,"level":4,"parent":313597037117441,"text":"downloading 'https://cache.example.org/gccsfnz4plpnxcn44f72rvnsaijbqnpm.narinfo'","type":101}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[11,11,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[11,11,0,0],"id":313597037117442,"type":105}
+@nix {"action":"result","fields":[11,11,0,0],"id":313597037117442,"type":105}
+@nix {"action":"stop","id":313597037117441}
+@nix {"action":"stop","id":313597037117442}
+@nix {"action":"start","fields":["/nix/store/gccsfnz4plpnxcn44f72rvnsaijbqnpm-foreign-1.0","https://cache.nixos.org"],"id":313597037117443,"level":4,"parent":0,"text":"querying info about '/nix/store/gccsfnz4plpnxcn44f72rvnsaijbqnpm-foreign-1.0' on 'https://cache.nixos.org'","type":109}
+@nix {"action":"start","fields":["https://cache.nixos.org/gccsfnz4plpnxcn44f72rvnsaijbqnpm.narinfo"],"id":313597037117444,"level":4,"parent":313597037117443,"text":"downloading 'https://cache.nixos.org/gccsfnz4plpnxcn44f72rvnsaijbqnpm.narinfo'","type":101}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":313597037117444,"type":105}
+@nix {"action":"result","fields":[3,3,0,0],"id":313597037117444,"type":105}
+@nix {"action":"stop","id":313597037117443}
+@nix {"action":"stop","id":313597037117444}
+@nix {"action":"stop","id":313597037117440}
+@nix {"action":"msg","level":3,"msg":"this derivation will be built:"}
+@nix {"action":"msg","level":3,"msg":"  /nix/store/ijf89wz2m6460mama3yzf6zgx1s78l57-foreign-1.0.drv"}
+@nix {"action":"start","id":313597037117445,"level":0,"parent":0,"text":"","type":102}
+@nix {"action":"start","id":313597037117446,"level":0,"parent":0,"text":"","type":104}
+@nix {"action":"start","id":313597037117447,"level":0,"parent":0,"text":"","type":103}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117446,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117447,"type":105}
+@nix {"action":"result","fields":[101,0],"id":313597037117445,"type":106}
+@nix {"action":"result","fields":[100,0],"id":313597037117445,"type":106}
+@nix {"action":"start","id":313597037117448,"level":6,"parent":0,"text":"querying info about missing paths","type":0}
+@nix {"action":"stop","id":313597037117448}
+@nix {"action":"result","fields":[0,1,0,0],"id":313597037117446,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117447,"type":105}
+@nix {"action":"result","fields":[101,0],"id":313597037117445,"type":106}
+@nix {"action":"result","fields":[100,0],"id":313597037117445,"type":106}
+@nix {"action":"result","fields":[0,1,0,1],"id":313597037117446,"type":105}
+@nix {"action":"result","fields":[0,0,0,0],"id":313597037117447,"type":105}
+@nix {"action":"result","fields":[101,0],"id":313597037117445,"type":106}
+@nix {"action":"result","fields":[100,0],"id":313597037117445,"type":106}
+@nix {"action":"stop","id":313597037117447}
+@nix {"action":"stop","id":313597037117446}
+@nix {"action":"stop","id":313597037117445}
+@nix {"action":"msg","column":null,"file":null,"level":0,"line":null,"msg":"\u001b[31;1merror:\u001b[0m Cannot build '\u001b[35;1m/nix/store/ijf89wz2m6460mama3yzf6zgx1s78l57-foreign-1.0.drv\u001b[0m'.\n       Reason: \u001b[31;1mplatform mismatch\u001b[0m\n       Required system: '\u001b[35;1maarch64-darwin\u001b[0m'\n       Current system: '\u001b[35;1mx86_64-linux\u001b[0m'","raw_msg":"Cannot build '\u001b[35;1m/nix/store/ijf89wz2m6460mama3yzf6zgx1s78l57-foreign-1.0.drv\u001b[0m'.\nReason: \u001b[31;1mplatform mismatch\u001b[0m\nRequired system: '\u001b[35;1maarch64-darwin\u001b[0m'\nCurrent system: '\u001b[35;1mx86_64-linux\u001b[0m'"}

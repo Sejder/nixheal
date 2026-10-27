@@ -7,28 +7,35 @@ pub struct Git {
 }
 
 impl Git {
-    /// The work tree at `dir`, if it is one.
+    /// The work tree at `dir`, if it is one. When git refuses a repository it
+    /// can see (another user's, without safe.directory), that is said, not
+    /// skipped: without git, pins.json would not reach the flake.
     pub fn open(dir: &Path) -> Option<Self> {
         let git = Self {
             dir: dir.to_path_buf(),
         };
-        git.quiet(&["rev-parse", "--is-inside-work-tree"])
-            .then_some(git)
+        let out = git
+            .command()
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            return Some(git);
+        }
+        if dir.ancestors().any(|d| d.join(".git").exists()) {
+            crate::log::warn(&format!(
+                "git refuses {}: {}",
+                dir.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        None
     }
 
     fn command(&self) -> Command {
         let mut c = Command::new("git");
         c.arg("-C").arg(&self.dir).stdin(Stdio::null());
         c
-    }
-
-    fn quiet(&self, args: &[&str]) -> bool {
-        self.command()
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
     }
 
     pub fn tracked(&self, path: &Path) -> bool {
@@ -52,6 +59,20 @@ impl Git {
             .context("spawning git add")?;
         if !status.success() {
             bail!("git add --intent-to-add {} failed", path.display());
+        }
+        Ok(())
+    }
+
+    /// Undo --intent-to-add for a file this run created.
+    pub fn forget(&self, path: &Path) -> Result<()> {
+        let status = self
+            .command()
+            .args(["rm", "--cached", "--quiet", "--ignore-unmatch", "--"])
+            .arg(path)
+            .status()
+            .context("spawning git rm")?;
+        if !status.success() {
+            bail!("git rm --cached {} failed", path.display());
         }
         Ok(())
     }
@@ -80,7 +101,16 @@ impl Git {
         }
         let out = self
             .command()
-            .args(["commit", "-q", "-m", message, "--"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--no-verify",
+                "-m",
+                message,
+                "--",
+            ])
             .args(paths)
             .output()
             .context("spawning git commit")?;
