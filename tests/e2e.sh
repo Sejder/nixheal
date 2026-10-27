@@ -246,6 +246,12 @@ expect_pins a ""
 expect_pins b ""
 [ -z "$(held_reason b)" ] || fail "b is still held"
 
+step "r5 quiet switch: nothing changes, so nothing is printed"
+autopin_ switch --quiet || fail "the quiet switch gave up"
+reject_log "round 1"
+reject_log "builds"
+[ -z "$(grep 'autopin:' "$log" || true)" ] || fail "the quiet switch printed: $(cat "$log")"
+
 step "r6: hello breaks on a, the local host, and is denylisted: nothing changes"
 write_config '"hello"'
 revision fixed false broken ok
@@ -262,8 +268,9 @@ cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored"
 [ "$(nh_calls)" = "$before_calls" ] || fail "a failed update switched"
 write_config ""
 
-step "r6 dry run: shows the hello pins, writes nothing"
-autopin_ update --dry-run || fail "the dry run gave up"
+step "r6 dry run, quiet: shows the hello pins and nothing else, writes nothing"
+autopin_ -q update --dry-run || fail "the dry run gave up"
+reject_log "round 1"
 expect_log "dry run: would have pinned host a: toypkgs.hello"
 expect_log "dry run: would have pinned host b: toypkgs.hello"
 cmp -s "$sys/flake.lock" "$work/before.lock" || fail "the dry run changed flake.lock"

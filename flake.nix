@@ -36,6 +36,10 @@
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postInstall = ''
+              wrapProgram $out/bin/autopin --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.nix-output-monitor ]}
+            '';
             meta.mainProgram = "autopin";
           };
         }
@@ -132,6 +136,7 @@
             assert machine.config.environment.etc."extra-hello".text == "hello";
             assert settings.self == "test";
             assert settings.kind == "nixos";
+            assert settings.quiet == false;
             assert settings.inputs == [ "extra" "nixpkgs" ];
             assert builtins.elem machine.config.programs.autopin.package machine.config.environment.systemPackages;
             pkgs.runCommand "autopin-module-check" { } "touch $out";

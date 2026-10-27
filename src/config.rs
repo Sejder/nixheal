@@ -24,6 +24,8 @@ pub struct Config {
     pub warn_after_days: i64,
     #[serde(default)]
     pub deny: Vec<String>,
+    #[serde(default)]
+    pub quiet: bool,
 }
 
 fn default_warn_after_days() -> i64 {

@@ -20,6 +20,9 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// Only report pins, unpins, holds, warnings and errors.
+    #[arg(short, long, global = true)]
+    quiet: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -72,6 +75,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    log::set_quiet(cli.quiet);
     let result = match &cli.command {
         Command::Update { build, inputs } => cmd::reconcile(build, Some(inputs)),
         Command::Switch { build } => cmd::reconcile(build, None),

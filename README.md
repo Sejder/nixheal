@@ -40,6 +40,7 @@ Options:
 | `hosts`, `homes` | configurations to build and pin when autopin runs here |
 | `warnAfterDays` | log a pin at warning level after this many days (14) |
 | `deny` | extra attrs never to pin (`cuda*`) |
+| `quiet` | always run as `--quiet` |
 | `nixpkgs.<input>` | import another nixpkgs with pins; `argName` passes it to modules |
 
 The settings are written to `/etc/autopin.json` or `~/.config/autopin.json`,
@@ -57,6 +58,7 @@ autopin clear <attr>        # remove a pin; --held releases a held host
 ```
 
 - `update` and `switch` take `--dry-run`, `--no-commit`, `--no-switch` and `--only <name>`.
+- `-q` / `--quiet` (or `programs.autopin.quiet = true`) prints only pins, unpins, holds, warnings and errors. nh's own output is unchanged.
 - They run in a dirty tree and commit only `flake.lock` and `pins.json`.
 - If the machine's own configuration cannot be fixed, both files are put back. Nothing is committed and nothing is switched.
 

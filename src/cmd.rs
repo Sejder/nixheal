@@ -73,7 +73,10 @@ struct Ctx {
 impl Ctx {
     fn open(at: &Where, need_config: bool) -> Result<Self> {
         let config = match config::load(at.config.as_deref()) {
-            Ok(c) => Some(c),
+            Ok(c) => {
+                log::set_quiet(c.quiet);
+                Some(c)
+            }
             Err(e) if need_config => return Err(e),
             Err(_) => None,
         };
@@ -192,18 +195,18 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
 
     if let Some(why) = &report.local_failure {
         restore()?;
-        log::info(&format!("not switching: {why}"));
-        log::info("restored flake.lock and pins.json; nothing was committed");
+        log::change(&format!("not switching: {why}"));
+        log::change("restored flake.lock and pins.json; nothing was committed");
         return Ok(ExitCode::from(1));
     }
 
     if args.dry_run {
         restore()?;
         if report.changes.is_empty() {
-            log::info("dry run: no pins would change");
+            log::change("dry run: no pins would change");
         }
         for c in &report.changes {
-            log::info(&format!("dry run: would have {c}"));
+            log::change(&format!("dry run: would have {c}"));
         }
         return Ok(ExitCode::SUCCESS);
     }

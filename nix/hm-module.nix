@@ -73,6 +73,7 @@ in
           homes
           warnAfterDays
           deny
+          quiet
           ;
         inputs = builtins.attrNames cfg.packageSets;
       };

@@ -78,6 +78,11 @@ in
     example = [ "cuda*" ];
     description = "Attributes never to pin, on top of the built-in list. A trailing * matches a prefix.";
   };
+  quiet = mkOption {
+    type = types.bool;
+    default = false;
+    description = "Only report pins, unpins, holds, warnings and errors, as with --quiet.";
+  };
   nixpkgs = mkOption {
     type = types.attrsOf nixpkgsSet;
     default = { };

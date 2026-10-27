@@ -176,7 +176,7 @@ impl Engine {
                 Ok(drv) => built.push((i, drv)),
                 Err(msgs) => {
                     for m in &msgs {
-                        eprintln!("{m}");
+                        log::nix_error(m);
                     }
                     eval_failed.push((i, msgs));
                 }
@@ -381,7 +381,7 @@ impl Engine {
                     if st.new_pins > self.max_new_pins {
                         return Err(format!("more than {} new pins needed in one run", self.max_new_pins));
                     }
-                    log::info(&format!(
+                    log::change(&format!(
                         "pinned {key} at {}: {}",
                         describe(&locked),
                         w.failed_drv.as_deref().unwrap_or("evaluation failed")
@@ -408,7 +408,7 @@ impl Engine {
             _ => None,
         });
         if let Some(reason) = local_failure {
-            log::info(&format!("giving up on {}: {reason}", st_name(self.local.as_ref())));
+            log::change(&format!("giving up on {}: {reason}", st_name(self.local.as_ref())));
             report.local_failure = Some(reason);
             return Ok(report);
         }
@@ -418,11 +418,11 @@ impl Engine {
             match st.status {
                 Status::Done => {
                     for (input, attr) in st.retrying.keys() {
-                        log::info(&format!("unpinned {target}: {input}.{attr}: builds again"));
+                        log::change(&format!("unpinned {target}: {input}.{attr}: builds again"));
                     }
                     report.changes.extend(st.retrying.keys().map(|(i, a)| format!("unpinned {target}: {i}.{a}")));
                     if st.held_before.is_some() {
-                        log::info(&format!("released {target}: it builds with the new lock"));
+                        log::change(&format!("released {target}: it builds with the new lock"));
                         report.changes.push(format!("released {target}"));
                     }
                     let previous = st.base.as_ref();
@@ -453,7 +453,7 @@ impl Engine {
                             }
                         }
                     };
-                    log::info(&format!("held {target} on its last good lock since {}: {reason}", held.since));
+                    log::change(&format!("held {target} on its last good lock since {}: {reason}", held.since));
                     entry.held = Some(held);
                     file.set(target.kind, &target.name, entry);
                 }

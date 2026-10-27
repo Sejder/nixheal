@@ -2,7 +2,7 @@ use crate::graph::Graph;
 use crate::logparse;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -79,17 +79,35 @@ impl Nix {
         }
     }
 
-    /// Build derivations in one `--keep-going` run, forwarding error messages
-    /// to stderr so they land in the journal.
+    /// Build derivations in one `--keep-going` run. On a terminal the log also
+    /// goes to nix-output-monitor, as with nh; otherwise error messages are
+    /// forwarded to stderr so they land in the journal.
     pub fn build_drvs(&self, drvs: &[String]) -> Result<BuildOutcome> {
-        let mut child = command()
-            .args(["build", "--no-link", "--keep-going", "--log-format", "internal-json"])
+        let mut nom = if std::io::stderr().is_terminal() && !crate::log::is_quiet() {
+            Command::new("nom")
+                .arg("--json")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .ok()
+        } else {
+            None
+        };
+
+        let mut build = command();
+        build.args(["build", "--no-link", "--keep-going", "--log-format", "internal-json"]);
+        if nom.is_some() {
+            build.arg("-v");
+        }
+        let mut child = build
             .args(drvs.iter().map(|d| format!("{d}^*")))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .context("spawning nix build")?;
 
+        let mut monitor = nom.as_mut().and_then(|n| n.stdin.take());
         let mut reader = BufReader::new(child.stderr.take().expect("piped stderr"));
         let mut errors = Vec::new();
         let mut buf = Vec::new();
@@ -98,14 +116,25 @@ impl Nix {
             if reader.read_until(b'\n', &mut buf)? == 0 {
                 break;
             }
+            if let Some(pipe) = &mut monitor
+                && pipe.write_all(&buf).is_err()
+            {
+                monitor = None;
+            }
             let line = String::from_utf8_lossy(&buf);
             if let Some(msg) = logparse::error_message(line.trim_end()) {
-                eprintln!("{msg}");
+                if monitor.is_none() {
+                    crate::log::nix_error(&msg);
+                }
                 errors.push(msg);
             }
         }
 
         let status = child.wait().context("waiting for nix build")?;
+        drop(monitor);
+        if let Some(mut n) = nom {
+            let _ = n.wait();
+        }
         Ok(BuildOutcome { success: status.success(), errors })
     }
 
