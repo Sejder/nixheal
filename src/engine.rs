@@ -4,7 +4,7 @@ use crate::graph::{Ascent, Graph};
 use crate::lock::Lock;
 use crate::log;
 use crate::logparse::{self, Failure};
-use crate::nix::Nix;
+use crate::nix::{Monitor, Nix};
 use crate::pins::{Entry, Held, Pin, PinsFile, Reason};
 use crate::resolve::{self, Matcher};
 use anyhow::Result;
@@ -36,6 +36,8 @@ pub struct Report {
     /// One line per pin, unpin, hold and release, for logs and commit messages.
     pub changes: Vec<String>,
     pub local_failure: Option<String>,
+    /// The local machine's built system, for switching without evaluating it again.
+    pub local_drv: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -61,7 +63,7 @@ struct State {
     held_lock: Option<Lock>,
     retrying: BTreeMap<(String, String), Pin>,
     inputs: Vec<String>,
-    sets: Vec<(String, String)>,
+    drv: Option<String>,
     status: Status,
     new_pins: usize,
 }
@@ -127,20 +129,17 @@ impl Engine {
         entry.lock_sha256 = self.new_lock.sha256();
         entry.lock_last_modified = self.new_lock.last_modified();
 
-        let inputs = match self.nix.attr_names(&target.package_sets()) {
-            Ok(names) => names,
-            Err(e) => {
+        let inputs = if self.fallback_inputs.is_empty() {
+            self.nix.attr_names(&target.package_sets()).unwrap_or_else(|e| {
                 log::info(&format!(
-                    "could not list package sets of {target}, using the configured inputs: {}",
+                    "could not list package sets of {target}, assuming only nixpkgs: {}",
                     e.to_string().lines().last().unwrap_or_default()
                 ));
-                self.fallback_inputs.clone()
-            }
+                vec!["nixpkgs".into()]
+            })
+        } else {
+            self.fallback_inputs.clone()
         };
-        let sets = inputs
-            .iter()
-            .map(|i| (i.clone(), format!("{}.{i}", target.package_sets())))
-            .collect();
 
         Ok(State {
             target: target.clone(),
@@ -150,7 +149,7 @@ impl Engine {
             held_lock,
             retrying,
             inputs,
-            sets,
+            drv: None,
             status: Status::Active,
             new_pins: 0,
         })
@@ -171,48 +170,26 @@ impl Engine {
     }
 
     fn round(&self, states: &mut [State], active: &[usize]) -> Result<()> {
-        // The common case: everything evaluates and builds in one nix build,
-        // which is also what shows the nom view from the start.
-        let outputs: Vec<String> = active.iter().map(|&i| states[i].target.output()).collect();
-        let fast = self.nix.build_outputs(&outputs)?;
-        if fast.success {
-            for &i in active {
-                states[i].status = Status::Done;
-            }
-            return Ok(());
-        }
-        let fast_failed: Vec<String> = build_failures(&fast.errors);
-
-        // Something failed: evaluate each host on its own to tell evaluation
-        // failures apart and to get the drvs the failures are traced in.
+        // Evaluate each host once and build what evaluated, in one nom view.
+        // The drvs are kept, so a failure is traced without evaluating again.
+        let mut monitor = Monitor::start();
         let mut built: Vec<(usize, String)> = Vec::new();
         let mut eval_failed: Vec<(usize, Vec<String>)> = Vec::new();
         for &i in active {
-            log::info(&format!("evaluating {} to trace the failure", states[i].target));
-            match self.nix.drv_path(&states[i].target.output())? {
+            match self.nix.drv_path(&states[i].target.output(), &mut monitor)? {
                 Ok(drv) => built.push((i, drv)),
-                Err(msgs) => {
-                    for m in &msgs {
-                        log::nix_error(m);
-                    }
-                    eval_failed.push((i, msgs));
-                }
+                Err(msgs) => eval_failed.push((i, msgs)),
             }
         }
+        let drvs: Vec<String> = built.iter().map(|(_, d)| d.clone()).collect();
+        let outcome = if drvs.is_empty() { None } else { Some(self.nix.build_drvs(&drvs, &mut monitor)?) };
+        monitor.finish();
 
-        if !built.is_empty() {
-            let drvs: Vec<String> = built.iter().map(|(_, d)| d.clone()).collect();
-            // nix build evaluates every output before it builds anything, so
-            // build failures from the first run mean nothing else stopped it.
-            // Otherwise an evaluation failure kept these drvs from building.
-            let outcome = if !fast_failed.is_empty() && eval_failed.is_empty() {
-                fast
-            } else {
-                self.nix.build_drvs(&drvs)?
-            };
+        if let Some(outcome) = outcome {
             if outcome.success {
-                for (i, _) in &built {
+                for (i, drv) in &built {
                     states[*i].status = Status::Done;
+                    states[*i].drv = Some(drv.clone());
                 }
             } else {
                 let failed = build_failures(&outcome.errors);
@@ -225,6 +202,7 @@ impl Engine {
                         st.status = Status::Failed("the build failed without a failure autopin recognises".into());
                     } else if mine.is_empty() {
                         st.status = Status::Done;
+                        st.drv = Some(top.clone());
                     } else {
                         let wanted = self.build_wanted(&graph, &closure, &mine, st)?;
                         self.apply(st, wanted);
@@ -286,7 +264,7 @@ impl Engine {
                 None => return Ok(Err(format!("{drv} is a dependency of nearly everything"))),
             }
         }
-        let matcher = match Matcher::build(&self.nix, graph, &nodes, &st.sets) {
+        let matcher = match Matcher::build(&self.nix, graph, &nodes, &st.target.package_sets(), &st.inputs) {
             Ok(m) => m,
             Err(e) => return Ok(Err(format!("matching packages failed: {e:#}"))),
         };
@@ -435,6 +413,9 @@ impl Engine {
             let target = st.target.clone();
             match st.status {
                 Status::Done => {
+                    if Some(&target) == self.local.as_ref() {
+                        report.local_drv = st.drv.clone();
+                    }
                     for (input, attr) in st.retrying.keys() {
                         log::change(&format!("unpinned {target}: {input}.{attr}: builds again"));
                     }

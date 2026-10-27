@@ -71,7 +71,8 @@ impl Matcher {
         nix: &Nix,
         graph: &Graph,
         nodes: &HashSet<String>,
-        sets: &[(String, String)],
+        sets_attr: &str,
+        inputs: &[String],
     ) -> Result<Self> {
         let names: BTreeSet<String> = nodes
             .iter()
@@ -79,18 +80,21 @@ impl Matcher {
             .flat_map(candidate_names)
             .collect();
         let mut m = Matcher::default();
-        if names.is_empty() {
+        let inputs: BTreeSet<String> = inputs.iter().filter(|i| is_attr_name(i)).cloned().collect();
+        if names.is_empty() || inputs.is_empty() {
             return Ok(m);
         }
 
+        // One evaluation for every package set: the host's configuration is
+        // evaluated once instead of once per set.
         let apply = format!(
-            r#"set: builtins.listToAttrs (map (n: {{ name = n; value = let r = builtins.tryEval (if builtins.hasAttr n set then (let v = builtins.getAttr n set; in if builtins.isAttrs v && (v.type or null) == "derivation" then v.drvPath else null) else null); in if r.success then r.value else null; }}) {})"#,
-            nix_list(&names)
+            r#"sets: builtins.listToAttrs (map (input: {{ name = input; value = let set = sets.${{input}} or {{ }}; in builtins.listToAttrs (map (n: {{ name = n; value = let r = builtins.tryEval (if builtins.hasAttr n set then (let v = builtins.getAttr n set; in if builtins.isAttrs v && (v.type or null) == "derivation" then v.drvPath else null) else null); in if r.success then r.value else null; }}) {names}); }}) {inputs})"#,
+            names = nix_list(&names),
+            inputs = nix_list(&inputs)
         );
-
-        for (input, attr) in sets {
-            let result = nix.eval_apply(attr, &apply)?;
-            for (name, drv) in result.as_object().into_iter().flatten() {
+        let result = nix.eval_apply(sets_attr, &apply)?;
+        for (input, found) in result.as_object().into_iter().flatten() {
+            for (name, drv) in found.as_object().into_iter().flatten() {
                 if let Some(drv) = drv.as_str().filter(|d| nodes.contains(*d)) {
                     m.by_drv
                         .entry(drv.to_string())

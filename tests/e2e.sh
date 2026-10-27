@@ -63,6 +63,13 @@ expect_pins() {
 expect_log() { grep -qF -- "$1" "$log" || fail "log lacks: $1"; }
 reject_log() { if grep -qF -- "$1" "$log"; then fail "log unexpectedly has: $1"; fi; }
 commits() { git -C "$sys" rev-list --count HEAD; }
+
+# nh gets the system autopin built, so it does not evaluate the flake again.
+expect_switched_to_built() {
+  local want
+  want="$(nix eval --raw "$sys#nixosConfigurations.$1.config.system.build.toplevel.outPath")"
+  [ "$(tail -n1 "$calls")" = "os switch $want" ] || fail "nh was not given the built $1 ($want): $(tail -n1 "$calls")"
+}
 nh_calls() { wc -l <"$calls" | tr -d ' '; }
 
 expect_built() {
@@ -182,7 +189,7 @@ autopin_ update || fail "autopin update gave up on r1"
 expect_log "created $sys/pins.json"
 git -C "$sys" ls-files --error-unmatch pins.json >/dev/null || fail "pins.json is not tracked"
 git -C "$sys" diff --quiet HEAD -- pins.json || fail "pins.json is not committed"
-[ "$(tail -n1 "$calls")" = "os switch $sys -H a" ] || fail "nh not called for a: $(cat "$calls")"
+expect_switched_to_built a
 expect_pins a ""
 expect_pins b ""
 
@@ -212,7 +219,7 @@ before_commits="$(commits)"
 autopin_ switch || fail "autopin switch gave up on r2"
 reject_log "retrying"
 [ "$(commits)" = "$before_commits" ] || fail "switch committed without changes"
-[ "$(tail -n1 "$calls")" = "os switch $sys -H a" ] || fail "switch did not call nh"
+expect_switched_to_built a
 
 step "r3: libfoo is fixed, gone is still removed"
 revision fixed true 3 ok

@@ -120,11 +120,20 @@ fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<()> {
     Ok(())
 }
 
-fn switch(target: &Target, flake: &Path) -> Result<ExitCode> {
+/// Switch with nh. Given the system autopin just built, nh only diffs and
+/// activates it; otherwise it evaluates and builds the flake itself.
+fn switch(target: &Target, flake: &Path, built: Option<&str>) -> Result<ExitCode> {
     let mut nh = Command::new("nh");
     match target.kind {
-        Kind::Nixos => nh.args(["os", "switch"]).arg(flake).args(["-H", &target.name]),
-        Kind::Home => nh.args(["home", "switch"]).arg(flake).args(["-c", &target.name]),
+        Kind::Nixos => nh.args(["os", "switch"]),
+        Kind::Home => nh.args(["home", "switch"]),
+    };
+    match built {
+        Some(path) => nh.arg(path),
+        None => match target.kind {
+            Kind::Nixos => nh.arg(flake).args(["-H", &target.name]),
+            Kind::Home => nh.arg(flake).args(["-c", &target.name]),
+        },
     };
     log::info(&format!("switching {target} with nh"));
     let status = nh.status().context("running nh; is it installed?")?;
@@ -228,7 +237,17 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
     }
 
     match &local {
-        Some(target) if !args.no_switch => switch(target, &ctx.flake),
+        Some(target) if !args.no_switch => {
+            let built = match report.local_drv.as_deref().map(nix::out_path) {
+                Some(Ok(path)) => Some(path),
+                Some(Err(e)) => {
+                    log::info(&format!("letting nh evaluate again: {e:#}"));
+                    None
+                }
+                None => None,
+            };
+            switch(target, &ctx.flake, built.as_deref())
+        }
         _ => Ok(ExitCode::SUCCESS),
     }
 }

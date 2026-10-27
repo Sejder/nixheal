@@ -1,10 +1,13 @@
 use crate::graph::Graph;
+use crate::log;
 use crate::logparse;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
+
+const STORE: &str = "/nix/store/";
 
 pub struct Nix {
     flake: String,
@@ -34,12 +37,86 @@ fn checked(what: &str, out: Output) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// Error messages from internal-json stderr, or the plain stderr tail when
-/// nix printed none in that format.
-fn error_messages(stderr: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(stderr);
-    let msgs: Vec<String> = text.lines().filter_map(logparse::error_message).collect();
-    if msgs.is_empty() { vec![tail(stderr, 40)] } else { msgs }
+/// One nix-output-monitor view on a terminal, fed by every nix command of a
+/// round, so evaluation and build show as one session the way nh shows them.
+/// Off a terminal, or with --quiet, there is none, and error messages go to
+/// stderr instead, where the journal picks them up.
+pub struct Monitor {
+    nom: Option<Child>,
+    pipe: Option<ChildStdin>,
+}
+
+impl Monitor {
+    pub fn start() -> Self {
+        let nom = (std::io::stderr().is_terminal() && !log::is_quiet())
+            .then(|| {
+                Command::new("nom")
+                    .arg("--json")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .ok()
+            })
+            .flatten();
+        let mut m = Self { nom, pipe: None };
+        m.pipe = m.nom.as_mut().and_then(|n| n.stdin.take());
+        m
+    }
+
+    fn active(&self) -> bool {
+        self.pipe.is_some()
+    }
+
+    /// Run `cmd` with internal-json logging, feeding its stderr to nom and
+    /// collecting its error messages and stdout.
+    fn run(&mut self, mut cmd: Command) -> Result<(ExitStatus, Vec<u8>, Vec<String>)> {
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawning nix")?;
+
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let collect = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            stdout.read_to_end(&mut out).map(|_| out)
+        });
+
+        let mut reader = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let mut errors = Vec::new();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            if reader.read_until(b'\n', &mut buf)? == 0 {
+                break;
+            }
+            if let Some(pipe) = &mut self.pipe
+                && pipe.write_all(&buf).is_err()
+            {
+                self.pipe = None;
+            }
+            let line = String::from_utf8_lossy(&buf);
+            if let Some(msg) = logparse::error_message(line.trim_end()) {
+                if !self.active() {
+                    log::nix_error(&msg);
+                }
+                errors.push(msg);
+            }
+        }
+
+        let status = child.wait().context("waiting for nix")?;
+        let out = collect.join().expect("stdout reader")?;
+        Ok((status, out, errors))
+    }
+
+    pub fn finish(mut self) {
+        self.pipe = None;
+        if let Some(mut n) = self.nom.take() {
+            let _ = n.wait();
+        }
+    }
 }
 
 impl Nix {
@@ -65,31 +142,30 @@ impl Nix {
     }
 
     /// The drvPath of `attr`, or the evaluation error messages.
-    pub fn drv_path(&self, attr: &str) -> Result<Result<String, Vec<String>>> {
-        let out = command()
-            .args(["eval", "--raw", "--log-format", "internal-json"])
-            .arg(self.installable(&format!("{attr}.drvPath")))
-            .stdin(Stdio::null())
-            .output()
-            .context("spawning nix eval")?;
-        if out.status.success() {
-            Ok(Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    pub fn drv_path(&self, attr: &str, monitor: &mut Monitor) -> Result<Result<String, Vec<String>>> {
+        let mut cmd = command();
+        cmd.args(["eval", "--raw", "--log-format", "internal-json"])
+            .arg(self.installable(&format!("{attr}.drvPath")));
+        let (status, out, errors) = monitor.run(cmd)?;
+        if status.success() {
+            Ok(Ok(String::from_utf8_lossy(&out).trim().to_string()))
+        } else if errors.is_empty() {
+            Ok(Err(vec![format!("nix eval {attr} failed")]))
         } else {
-            Ok(Err(error_messages(&out.stderr)))
+            Ok(Err(errors))
         }
     }
 
-    /// Evaluate and build flake outputs in one `--keep-going` run, so a
-    /// terminal shows nom from the first second of evaluation on.
-    pub fn build_outputs(&self, attrs: &[String]) -> Result<BuildOutcome> {
-        let installables: Vec<String> = attrs.iter().map(|a| self.installable(a)).collect();
-        build(&installables)
-    }
-
     /// Build already evaluated derivations in one `--keep-going` run.
-    pub fn build_drvs(&self, drvs: &[String]) -> Result<BuildOutcome> {
-        let installables: Vec<String> = drvs.iter().map(|d| format!("{d}^*")).collect();
-        build(&installables)
+    pub fn build_drvs(&self, drvs: &[String], monitor: &mut Monitor) -> Result<BuildOutcome> {
+        let mut cmd = command();
+        cmd.args(["build", "--no-link", "--keep-going", "--log-format", "internal-json"]);
+        if monitor.active() {
+            cmd.arg("-v");
+        }
+        cmd.args(drvs.iter().map(|d| format!("{d}^*")));
+        let (status, _, errors) = monitor.run(cmd)?;
+        Ok(BuildOutcome { success: status.success(), errors })
     }
 
     pub fn show_drvs(&self, drvs: &[String]) -> Result<Graph> {
@@ -120,64 +196,21 @@ impl Nix {
     }
 }
 
-/// On a terminal the log also goes to nix-output-monitor, as with nh;
-/// otherwise error messages are forwarded to stderr so they land in the
-/// journal.
-fn build(installables: &[String]) -> Result<BuildOutcome> {
-    let mut nom = if std::io::stderr().is_terminal() && !crate::log::is_quiet() {
-        Command::new("nom")
-            .arg("--json")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .ok()
-    } else {
-        None
-    };
-
-    let mut cmd = command();
-    cmd.args(["build", "--no-link", "--keep-going", "--log-format", "internal-json"]);
-    if nom.is_some() {
-        cmd.arg("-v");
-    }
-    let mut child = cmd
-        .args(installables)
+/// The `out` path of a built derivation, read from the drv itself.
+pub fn out_path(drv: &str) -> Result<String> {
+    let out = command()
+        .args(["derivation", "show", drv])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawning nix build")?;
-
-    let mut monitor = nom.as_mut().and_then(|n| n.stdin.take());
-    let mut reader = BufReader::new(child.stderr.take().expect("piped stderr"));
-    let mut errors = Vec::new();
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        if reader.read_until(b'\n', &mut buf)? == 0 {
-            break;
-        }
-        if let Some(pipe) = &mut monitor
-            && pipe.write_all(&buf).is_err()
-        {
-            monitor = None;
-        }
-        let line = String::from_utf8_lossy(&buf);
-        if let Some(msg) = logparse::error_message(line.trim_end()) {
-            if monitor.is_none() {
-                crate::log::nix_error(&msg);
-            }
-            errors.push(msg);
-        }
-    }
-
-    let status = child.wait().context("waiting for nix build")?;
-    drop(monitor);
-    if let Some(mut n) = nom {
-        let _ = n.wait();
-    }
-    Ok(BuildOutcome { success: status.success(), errors })
+        .output()
+        .context("spawning nix derivation show")?;
+    let json: Value = serde_json::from_slice(&checked("nix derivation show", out)?)?;
+    let drvs = json.get("derivations").unwrap_or(&json);
+    let path = drvs
+        .as_object()
+        .and_then(|o| o.values().next())
+        .and_then(|d| d["outputs"]["out"]["path"].as_str())
+        .with_context(|| format!("{drv} has no out path"))?;
+    Ok(if path.starts_with('/') { path.to_string() } else { format!("{STORE}{path}") })
 }
 
 pub fn eval_expr(expr: &str) -> Result<Value> {
