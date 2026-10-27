@@ -229,10 +229,24 @@ impl Engine {
                 st.status = Status::Failed(format!("evaluation fails in a way autopin cannot pin: {why}"));
                 continue;
             }
+            let context = logparse::eval_context(&msgs);
             let mut wanted = Vec::new();
             for attr in attrs {
-                match self.eval_input(st, &attr)? {
-                    Some(input) => wanted.push(Wanted {
+                let mut found = self.eval_input(st, &attr)?.map(|input| (input, attr.clone()));
+                if found.is_none() {
+                    for outer in &context {
+                        if let Some(input) = self.eval_input(st, outer)? {
+                            log::info(&format!(
+                                "{}: {attr} is not pinnable itself; {outer}, which evaluation fails inside, is",
+                                st.target
+                            ));
+                            found = Some((input, outer.clone()));
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some((input, attr)) => wanted.push(Wanted {
                         input,
                         attr,
                         reason: Reason::Eval,
@@ -309,6 +323,9 @@ impl Engine {
     /// A pin under retry counts as last good: the last lock only built because
     /// of it.
     fn eval_input(&self, st: &State, attr: &str) -> Result<Option<String>> {
+        if !resolve::is_attr_name(attr) {
+            return Ok(None);
+        }
         if let Some((input, _)) = st.retrying.keys().find(|(_, a)| a == attr) {
             return Ok(Some(input.clone()));
         }

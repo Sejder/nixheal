@@ -32,6 +32,11 @@ static REMOVED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"'([^']+)' has been (?:removed|renamed|replaced)").unwrap()
 });
 static VERSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.+?)-[0-9]").unwrap());
+static TRACE_OPTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"while evaluating the option `(?:systemd\.(?:user\.)?)?services\."?([A-Za-z0-9_+-]+)"?"#).unwrap()
+});
+static TRACE_DRV: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"while evaluating derivation '([^']+)'").unwrap());
 
 pub fn strip_ansi(s: &str) -> String {
     ANSI.replace_all(s, "").into_owned()
@@ -64,6 +69,33 @@ pub fn headline(msg: &str) -> String {
     }
     let last = lines.iter().rev().find(|l| informative(l)).copied().unwrap_or("");
     last.strip_prefix("error: ").unwrap_or(last).to_string()
+}
+
+/// Packages an evaluation error passed through on its way down, innermost
+/// first: services from option paths (`systemd.services.open-webui...` names
+/// open-webui) and derivations. When the package that broke is not pinnable
+/// itself, e.g. a Python library, one of these usually is.
+pub fn eval_context(messages: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for msg in messages {
+        let msg = strip_ansi(msg);
+        let mut found: Vec<(usize, String)> = TRACE_OPTION
+            .captures_iter(&msg)
+            .map(|c| (c.get(0).unwrap().start(), c[1].to_string()))
+            .chain(
+                TRACE_DRV
+                    .captures_iter(&msg)
+                    .map(|c| (c.get(0).unwrap().start(), strip_version(&c[1]).to_string())),
+            )
+            .collect();
+        found.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        for (_, name) in found {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
 }
 
 /// The text of an error-level message from a `--log-format internal-json` stderr line.
@@ -204,6 +236,18 @@ mod tests {
         let plain = "error:\n       \u{2026} while evaluating the attribute 'x'\n\n       (stack trace truncated; use '--show-trace' to show the full, detailed trace)\n\n       error: undefined variable 'foo'\n";
         assert_eq!(headline(plain), "undefined variable 'foo'");
         assert_eq!(headline("error: something broke"), "something broke");
+    }
+
+    #[test]
+    fn eval_context_innermost_first() {
+        let msg = "error:\n       \u{2026} while evaluating the option `system.build.toplevel':\n       \u{2026} while evaluating the option `warnings':\n       \u{2026} while evaluating the option `systemd.services.open-webui.serviceConfig':\n       \u{2026} while evaluating derivation 'open-webui-0.12.3'\n       error: Refusing to evaluate package 'python3.14-posthog-7.71.0' in /nix/store/x-source/pkgs/development/python-modules/posthog/default.nix:80 because it has problems:\n".to_string();
+        assert_eq!(eval_context(&[msg.clone()]), vec!["open-webui".to_string()]);
+        assert_eq!(
+            parse(&[msg]),
+            vec![Failure::Eval { attr: "python3.14-posthog".into(), kind: EvalKind::Refused }]
+        );
+        let quoted = "\u{2026} while evaluating the option `services.\"nginx\".virtualHosts':\n\u{2026} while evaluating the option `systemd.user.services.foo.serviceConfig':".to_string();
+        assert_eq!(eval_context(&[quoted]), vec!["foo".to_string(), "nginx".to_string()]);
     }
 
     #[test]

@@ -10,12 +10,12 @@ let
   nhFlake = config.programs.nh.flake or null;
 
   overlay =
-    input:
+    input: nixpkgsConfig:
     self.lib.mkOverlay {
       pins = cfg.pinsFile;
       kind = "hosts";
       inherit (cfg) name;
-      inherit input;
+      inherit input nixpkgsConfig;
     };
 
   extraSets = lib.mapAttrs (
@@ -23,7 +23,7 @@ let
     import set.source {
       inherit (pkgs.stdenv.hostPlatform) system;
       inherit (set) config;
-      overlays = lib.optional cfg.enable (overlay input);
+      overlays = lib.optional cfg.enable (overlay input set.config);
     }
   ) cfg.nixpkgs;
 
@@ -56,7 +56,7 @@ in
           message = "programs.autopin.pinsFile must point at the flake's pins.json";
         }
       ];
-      nixpkgs.overlays = lib.mkAfter [ (overlay "nixpkgs") ];
+      nixpkgs.overlays = lib.mkAfter [ (overlay "nixpkgs" config.nixpkgs.config) ];
     })
     (lib.mkIf (cfg.enable && runsAutopin) {
       environment.systemPackages = [ cfg.package ];

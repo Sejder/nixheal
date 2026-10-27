@@ -128,6 +128,21 @@
             assert (overlay { kind = "homes"; name = "mikke"; }) ? cowsay;
             assert overlay { pins = ./does-not-exist.json; } == { };
             assert overlay { pins = null; } == { };
+            assert
+              (self.lib.mkOverlay {
+                inherit pins;
+                name = "test";
+                input = "nixpkgs";
+              } prev (prev // { config.rewriteURL = null; config.notAnOption = null; })).hello.drvPath
+              == pkgs.hello.drvPath;
+            assert
+              (self.lib.mkOverlay {
+                inherit pins;
+                name = "test";
+                input = "nixpkgs";
+                nixpkgsConfig = { };
+              } prev prev).hello.drvPath
+              == pkgs.hello.drvPath;
             pkgs.runCommand "autopin-overlay-check" { } "touch $out";
           module =
             assert machine.pkgs.hello.pname == "hello";
