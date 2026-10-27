@@ -74,8 +74,47 @@ in
           warnAfterDays
           deny
           quiet
+          switcher
           ;
         inputs = builtins.attrNames cfg.packageSets;
+      };
+    })
+    (lib.mkIf (cfg.enable && cfg.autoUpgrade.enable && runsNixheal) {
+      assertions = [
+        {
+          assertion = builtins.elem cfg.name cfg.homes;
+          message = "programs.nixheal.autoUpgrade needs this home (${cfg.name}) in programs.nixheal.homes";
+        }
+      ];
+
+      systemd.user.services.nixheal-upgrade = {
+        Unit = {
+          Description = "Update the flake with nixheal and switch Home Manager";
+          After = [ "network-online.target" ];
+        };
+        Service = {
+          Type = "oneshot";
+          Environment = [ "PATH=${config.home.profileDirectory}/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin" ];
+          ExecStart = lib.escapeShellArgs (
+            [
+              (lib.getExe cfg.package)
+              "switch"
+            ]
+            ++ lib.optional (!cfg.autoUpgrade.commit) "--no-commit"
+            ++ [ "--update" ]
+            ++ cfg.autoUpgrade.inputs
+          );
+        };
+      };
+
+      systemd.user.timers.nixheal-upgrade = {
+        Unit.Description = "Scheduled nixheal upgrade";
+        Install.WantedBy = [ "timers.target" ];
+        Timer = {
+          OnCalendar = cfg.autoUpgrade.dates;
+          RandomizedDelaySec = cfg.autoUpgrade.randomizedDelaySec;
+          Persistent = true;
+        };
       };
     })
   ];

@@ -3,8 +3,6 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-const STORE: &str = "/nix/store/";
-
 #[derive(Debug, Default)]
 pub struct Node {
     pub name: String,
@@ -56,14 +54,28 @@ struct InputsJson {
     drvs: HashMap<String, IgnoredAny>,
 }
 
-fn full_path(p: String) -> String {
-    if p.starts_with('/') { p } else { format!("{STORE}{p}") }
+/// The store directory a store path lives in, e.g. /nix/store for
+/// /nix/store/...-hello.drv; newer `nix derivation show` output names
+/// derivations relative to it.
+pub fn store_dir_of(path: &str) -> String {
+    match path.rfind('/') {
+        Some(i) if i > 0 => path[..i].to_string(),
+        _ => "/nix/store".to_string(),
+    }
+}
+
+fn full_path(store: &str, p: String) -> String {
+    if p.starts_with('/') {
+        p
+    } else {
+        format!("{store}/{p}")
+    }
 }
 
 impl Graph {
     /// Accepts both `nix derivation show` layouts: the versioned one with
     /// `derivations` and store-relative keys, and the older full-path map.
-    pub fn from_show_json(bytes: &[u8]) -> Result<Self> {
+    pub fn from_show_json(bytes: &[u8], store: &str) -> Result<Self> {
         let drvs = match serde_json::from_slice::<NewDoc>(bytes) {
             Ok(doc) => doc.derivations,
             Err(_) => serde_json::from_slice::<HashMap<String, DrvJson>>(bytes)
@@ -80,10 +92,10 @@ impl Graph {
             let node = Node {
                 name: drv.name.or(drv.env.name).unwrap_or_default(),
                 pname: drv.env.pname,
-                inputs: inputs.into_iter().map(full_path).collect(),
+                inputs: inputs.into_iter().map(|i| full_path(store, i)).collect(),
                 parents: Vec::new(),
             };
-            graph.nodes.insert(full_path(path), node);
+            graph.nodes.insert(full_path(store, path), node);
         }
         graph.link();
         Ok(graph)
@@ -133,7 +145,12 @@ impl Graph {
             .filter(move |q| within.contains(*q))
     }
 
-    pub fn ancestors(&self, start: &str, within: &HashSet<String>, cap: usize) -> Option<HashSet<String>> {
+    pub fn ancestors(
+        &self,
+        start: &str,
+        within: &HashSet<String>,
+        cap: usize,
+    ) -> Option<HashSet<String>> {
         let mut seen = HashSet::new();
         let mut stack = vec![start.to_string()];
         while let Some(p) = stack.pop() {
@@ -229,11 +246,11 @@ mod tests {
     use super::*;
 
     fn s(p: &str) -> String {
-        format!("{STORE}{p}")
+        format!("/nix/store/{p}")
     }
 
     fn parse(json: serde_json::Value) -> Graph {
-        Graph::from_show_json(&serde_json::to_vec(&json).unwrap()).unwrap()
+        Graph::from_show_json(&serde_json::to_vec(&json).unwrap(), "/nix/store").unwrap()
     }
 
     // toplevel -> system-path -> {obs, vlc}; obs -> libfoo; vlc -> libfoo;
@@ -271,6 +288,26 @@ mod tests {
         assert_eq!(obs.pname.as_deref(), Some("obs-studio"));
         assert_eq!(obs.parents, vec![s("sp-system-path.drv")]);
         assert_eq!(g.nodes[&s("l-libfoo-1.drv")].parents.len(), 2);
+    }
+
+    #[test]
+    fn other_store_dirs() {
+        assert_eq!(store_dir_of("/nix/store/abc-hello.drv"), "/nix/store");
+        assert_eq!(store_dir_of("/opt/store/abc-hello.drv"), "/opt/store");
+        let g = Graph::from_show_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 4,
+                "derivations": { "a-app.drv": { "name": "app", "env": {}, "inputs": { "drvs": { "b-lib.drv": {} } } },
+                                 "b-lib.drv": { "name": "lib", "env": {}, "inputs": { "drvs": {} } } }
+            }))
+            .unwrap(),
+            "/opt/store",
+        )
+        .unwrap();
+        assert_eq!(
+            g.nodes["/opt/store/b-lib.drv"].parents,
+            vec!["/opt/store/a-app.drv".to_string()]
+        );
     }
 
     #[test]
@@ -323,7 +360,9 @@ mod tests {
         let is_match = matched(&["o-obs-studio-31.drv"]);
         assert_eq!(
             g.find_roots(&s("u-unit.drv"), &all(&g), 1000, is_match),
-            Ascent::Unpinnable { via: s("t-toplevel.drv") }
+            Ascent::Unpinnable {
+                via: s("t-toplevel.drv")
+            }
         );
     }
 
@@ -331,7 +370,10 @@ mod tests {
     fn caps_large_ascents() {
         let g = graph();
         let a = all(&g);
-        assert_eq!(g.find_roots(&s("l-libfoo-1.drv"), &a, 2, |_| false), Ascent::TooLarge);
+        assert_eq!(
+            g.find_roots(&s("l-libfoo-1.drv"), &a, 2, |_| false),
+            Ascent::TooLarge
+        );
         assert!(g.ancestors(&s("l-libfoo-1.drv"), &a, 2).is_none());
         assert_eq!(g.ancestors(&s("l-libfoo-1.drv"), &a, 100).unwrap().len(), 5);
     }

@@ -9,8 +9,11 @@ pub struct Git {
 impl Git {
     /// The work tree at `dir`, if it is one.
     pub fn open(dir: &Path) -> Option<Self> {
-        let git = Self { dir: dir.to_path_buf() };
-        git.quiet(&["rev-parse", "--is-inside-work-tree"]).then_some(git)
+        let git = Self {
+            dir: dir.to_path_buf(),
+        };
+        git.quiet(&["rev-parse", "--is-inside-work-tree"])
+            .then_some(git)
     }
 
     fn command(&self) -> Command {
@@ -61,7 +64,10 @@ impl Git {
             .output()
             .context("spawning git status")?;
         if !out.status.success() {
-            bail!("git status failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(!out.stdout.is_empty())
     }
@@ -79,7 +85,10 @@ impl Git {
             .output()
             .context("spawning git commit")?;
         if !out.status.success() {
-            bail!("git commit failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(true)
     }

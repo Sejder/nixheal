@@ -129,7 +129,11 @@ pub struct PinsFile {
 
 impl Default for PinsFile {
     fn default() -> Self {
-        Self { version: VERSION, hosts: BTreeMap::new(), homes: BTreeMap::new() }
+        Self {
+            version: VERSION,
+            hosts: BTreeMap::new(),
+            homes: BTreeMap::new(),
+        }
     }
 }
 
@@ -237,16 +241,20 @@ mod tests {
     }
 
     fn entry(lm: i64) -> Entry {
-        Entry { lock_sha256: format!("{lm}"), lock_last_modified: lm, ..Default::default() }
+        Entry {
+            lock_sha256: format!("{lm}"),
+            lock_last_modified: lm,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn round_trip_and_stable_order() {
         let mut f = PinsFile::default();
-        let e = f.entry_mut(Kind::Nixos, "ideapad");
+        let e = f.entry_mut(Kind::Nixos, "laptop");
         e.insert("nixpkgs-unstable", "zed-editor", pin("2026-10-20"));
         e.insert("nixpkgs", "hello", pin("2026-10-22"));
-        f.entry_mut(Kind::Home, "mikke").held = Some(Held {
+        f.entry_mut(Kind::Home, "alice").held = Some(Held {
             since: "2026-10-27".into(),
             reason: "linux fails".into(),
             lock: json!({ "nodes": {} }),
@@ -258,7 +266,7 @@ mod tests {
         assert!(text.find("\"nixpkgs\"").unwrap() < text.find("\"nixpkgs-unstable\"").unwrap());
         assert!(text.contains("\"checkedNarHash\""));
         assert!(text.contains("\"lockLastModified\""));
-        assert_eq!(f.entry(Kind::Nixos, "ideapad").unwrap().len(), 2);
+        assert_eq!(f.entry(Kind::Nixos, "laptop").unwrap().len(), 2);
     }
 
     #[test]
@@ -271,23 +279,35 @@ mod tests {
     #[test]
     fn merge_keeps_the_newer_lock() {
         let mut f = PinsFile::default();
-        assert!(f.merge(Kind::Nixos, "ideapad", entry(10)));
-        assert!(!f.merge(Kind::Nixos, "ideapad", entry(5)));
-        assert_eq!(f.entry(Kind::Nixos, "ideapad").unwrap().lock_last_modified, 10);
-        assert!(f.merge(Kind::Nixos, "ideapad", entry(10)));
-        assert!(f.merge(Kind::Nixos, "ideapad", entry(20)));
-        assert_eq!(f.entry(Kind::Nixos, "ideapad").unwrap().lock_last_modified, 20);
+        assert!(f.merge(Kind::Nixos, "laptop", entry(10)));
+        assert!(!f.merge(Kind::Nixos, "laptop", entry(5)));
+        assert_eq!(
+            f.entry(Kind::Nixos, "laptop").unwrap().lock_last_modified,
+            10
+        );
+        assert!(f.merge(Kind::Nixos, "laptop", entry(10)));
+        assert!(f.merge(Kind::Nixos, "laptop", entry(20)));
+        assert_eq!(
+            f.entry(Kind::Nixos, "laptop").unwrap().lock_last_modified,
+            20
+        );
     }
 
     #[test]
     fn merge_leaves_other_hosts_alone() {
         let mut f = PinsFile::default();
         f.set(Kind::Nixos, "pi", entry(3));
-        f.set(Kind::Home, "ideapad", entry(99));
-        f.merge(Kind::Nixos, "ideapad", entry(7));
+        f.set(Kind::Home, "laptop", entry(99));
+        f.merge(Kind::Nixos, "laptop", entry(7));
         assert_eq!(f.entry(Kind::Nixos, "pi").unwrap().lock_last_modified, 3);
-        assert_eq!(f.entry(Kind::Home, "ideapad").unwrap().lock_last_modified, 99);
-        assert_eq!(f.entry(Kind::Nixos, "ideapad").unwrap().lock_last_modified, 7);
+        assert_eq!(
+            f.entry(Kind::Home, "laptop").unwrap().lock_last_modified,
+            99
+        );
+        assert_eq!(
+            f.entry(Kind::Nixos, "laptop").unwrap().lock_last_modified,
+            7
+        );
     }
 
     #[test]

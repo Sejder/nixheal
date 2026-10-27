@@ -55,13 +55,19 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
     let list = if items.is_empty() {
         "nothing pinned".to_string()
     } else {
-        items.iter().map(|i| format!("{} ({})", i.what, age(i))).collect::<Vec<_>>().join(", ")
+        items
+            .iter()
+            .map(|i| format!("{} ({})", i.what, age(i)))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
 
     // One row per pin or hold, for a dynamic-list widget; never empty, so the
     // widget shows that all is well instead of nothing.
     let rows: Vec<Value> = if items.is_empty() {
-        vec![json!({ "name": "nothing pinned", "label": "OK", "kind": "none", "days": 0, "stale": false })]
+        vec![
+            json!({ "name": "nothing pinned", "label": "OK", "kind": "none", "days": 0, "stale": false }),
+        ]
     } else {
         items
             .iter()
@@ -118,7 +124,7 @@ mod tests {
     #[test]
     fn nothing_pinned_is_ok() {
         let mut f = PinsFile::default();
-        f.entry_mut(Kind::Nixos, "ideapad");
+        f.entry_mut(Kind::Nixos, "laptop");
         let s = summary(&f, today(), 14);
         assert_eq!(s["status"], "OK");
         assert_eq!(s["pins"], 0);
@@ -131,8 +137,10 @@ mod tests {
     #[test]
     fn fresh_pins_are_pinned_and_oldest_first() {
         let mut f = PinsFile::default();
-        f.entry_mut(Kind::Nixos, "home").insert("nixpkgs", "open-webui", pin("2026-10-20"));
-        f.entry_mut(Kind::Nixos, "pi").insert("nixpkgs", "sbctl", pin("2026-10-26"));
+        f.entry_mut(Kind::Nixos, "home")
+            .insert("nixpkgs", "open-webui", pin("2026-10-20"));
+        f.entry_mut(Kind::Nixos, "pi")
+            .insert("nixpkgs", "sbctl", pin("2026-10-26"));
         let s = summary(&f, today(), 14);
         assert_eq!(s["status"], "PINNED");
         assert_eq!(s["pins"], 2);
@@ -148,7 +156,8 @@ mod tests {
     #[test]
     fn held_and_stale() {
         let mut f = PinsFile::default();
-        f.entry_mut(Kind::Nixos, "home").insert("nixpkgs", "open-webui", pin("2026-10-26"));
+        f.entry_mut(Kind::Nixos, "home")
+            .insert("nixpkgs", "open-webui", pin("2026-10-26"));
         f.entry_mut(Kind::Nixos, "pi").held = Some(Held {
             since: "2026-10-25".into(),
             reason: "linux fails".into(),
@@ -158,11 +167,12 @@ mod tests {
         assert_eq!(s["status"], "HELD");
         assert_eq!(s["held"], 1);
 
-        f.entry_mut(Kind::Home, "mikke").insert("nixpkgs", "zed-editor", pin("2026-10-01"));
+        f.entry_mut(Kind::Home, "alice")
+            .insert("nixpkgs", "zed-editor", pin("2026-10-01"));
         let s = summary(&f, today(), 14);
         assert_eq!(s["status"], "STALE");
         assert_eq!(s["stale"], 1);
-        assert_eq!(s["oldest"], "mikke: zed-editor, 26d");
+        assert_eq!(s["oldest"], "alice: zed-editor, 26d");
         assert_eq!(s["items"][0]["label"], "26d, eval, STALE");
         assert_eq!(s["items"][1]["name"], "pi held");
         assert_eq!(s["items"][1]["label"], "2d, held");

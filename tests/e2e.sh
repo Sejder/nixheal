@@ -5,8 +5,8 @@
 #
 #   cargo build && tests/e2e.sh
 #
-# NIXHEAL overrides the binary under test. nh is replaced by a stub that
-# records its arguments.
+# NIXHEAL overrides the binary under test. nh, nixos-rebuild and home-manager
+# are replaced by stubs that record their arguments.
 
 set -euo pipefail
 
@@ -28,8 +28,10 @@ export XDG_STATE_HOME="$work/state"
 export GIT_AUTHOR_NAME=e2e GIT_AUTHOR_EMAIL=e2e@localhost
 export GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e2e@localhost
 mkdir -p "$work/bin"
-printf '#!/bin/sh\necho "$*" >> %s\n' "$calls" >"$work/bin/nh"
-chmod +x "$work/bin/nh"
+for tool in nh nixos-rebuild home-manager; do
+  printf '#!/bin/sh\necho "%s $*" >> %s\n' "$tool" "$calls" >"$work/bin/$tool"
+  chmod +x "$work/bin/$tool"
+done
 export PATH="$work/bin:$PATH"
 touch "$calls"
 
@@ -68,7 +70,7 @@ commits() { git -C "$sys" rev-list --count HEAD; }
 expect_switched_to_built() {
   local want
   want="$(nix eval --raw "$sys#nixosConfigurations.$1.config.system.build.toplevel.outPath")"
-  [ "$(tail -n1 "$calls")" = "os switch $want" ] || fail "nh was not given the built $1 ($want): $(tail -n1 "$calls")"
+  [ "$(tail -n1 "$calls")" = "nh os switch $want" ] || fail "nh was not given the built $1 ($want): $(tail -n1 "$calls")"
 }
 nh_calls() { wc -l <"$calls" | tr -d ' '; }
 
@@ -81,7 +83,14 @@ expect_built() {
 write_config() {
   cat >"$config" <<EOF
 { "kind": "nixos", "self": "a", "flake": "$sys", "hosts": ["a", "b"], "homes": [],
-  "inputs": ["toypkgs"], "warnAfterDays": 14, "deny": [$1] }
+  "inputs": ["toypkgs"], "warnAfterDays": 14, "deny": [$1]${2:+, $2} }
+EOF
+}
+
+write_home_config() {
+  cat >"$config" <<EOF
+{ "kind": "home", "self": "alice", "flake": "$sys", "hosts": [], "homes": ["alice"],
+  "inputs": ["toypkgs"], "warnAfterDays": 14, "deny": [] }
 EOF
 }
 
@@ -146,11 +155,12 @@ cat >"$sys/flake.nix" <<EOF
   outputs = { self, toypkgs }:
     let
       system = "$system";
-      mkHost = name: paths:
+      mkHost = name: paths: mkHostOf "hosts" name paths;
+      mkHostOf = kind: name: paths:
         let
           pkgs = import toypkgs {
             inherit system;
-            overlays = [ (import ./overlay.nix { pins = ./pins.json; inherit name; input = "toypkgs"; }) ];
+            overlays = [ (import ./overlay.nix { pins = ./pins.json; inherit kind name; input = "toypkgs"; }) ];
           };
           sp = derivation {
             name = "system-path-\${name}";
@@ -159,8 +169,9 @@ cat >"$sys/flake.nix" <<EOF
             args = [ "-c" "echo \$paths > \$out" ];
             paths = paths pkgs;
           };
-        in {
+        in rec {
           config.programs.nixheal.packageSets.toypkgs = pkgs;
+          activationPackage = config.system.build.toplevel;
           config.system.build.toplevel = derivation {
             name = "toplevel-\${name}";
             inherit system;
@@ -172,6 +183,7 @@ cat >"$sys/flake.nix" <<EOF
     in {
       nixosConfigurations.a = mkHost "a" (p: [ p.hello p.gone ]);
       nixosConfigurations.b = mkHost "b" (p: [ p.app p.hello p.linux ]);
+      homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]);
     };
 }
 EOF
@@ -185,7 +197,7 @@ git -C "$sys" add flake.lock
 git -C "$sys" commit -qm system
 
 step "r1: everything builds; update creates pins.json, commits it and switches a"
-nixheal_ update || fail "nixheal update gave up on r1"
+nixheal_ switch --update || fail "nixheal update gave up on r1"
 expect_log "created $sys/pins.json"
 git -C "$sys" ls-files --error-unmatch pins.json >/dev/null || fail "pins.json is not tracked"
 git -C "$sys" diff --quiet HEAD -- pins.json || fail "pins.json is not committed"
@@ -196,7 +208,7 @@ expect_pins b ""
 step "r2: libfoo breaks (only b uses app) and gone is removed (only a uses it)"
 revision broken true 2 ok
 before_calls="$(nh_calls)"
-nixheal_ update || fail "nixheal update gave up on r2"
+nixheal_ switch --update || fail "nixheal update gave up on r2"
 expect_pins a "toypkgs.gone"
 expect_pins b "toypkgs.app"
 [ "$(field a toypkgs gone reason)" = eval ] || fail "gone on a should be an eval pin"
@@ -223,7 +235,7 @@ expect_switched_to_built a
 
 step "r3: libfoo is fixed, gone is still removed"
 revision fixed true 3 ok
-nixheal_ update || fail "nixheal update gave up on r3"
+nixheal_ switch --update || fail "nixheal update gave up on r3"
 expect_log "unpinned host b: toypkgs.app: builds again"
 expect_log "still failing host a: toypkgs.gone"
 expect_pins a "toypkgs.gone"
@@ -234,7 +246,7 @@ cp "$sys/flake.lock" "$r3_lock"
 
 step "r4: linux breaks on b (denylisted): b is held on the r3 lock, a moves on"
 revision fixed true 4 broken
-nixheal_ update || fail "nixheal update gave up on r4"
+nixheal_ switch --update || fail "nixheal update gave up on r4"
 expect_log "held host b on its last good lock"
 case "$(held_reason b)" in *"linux fails but is never pinned"*) ;; *) fail "b should be held for linux: $(held_reason b)" ;; esac
 held_rev="$(jq_pins 'f.hosts.b.held.lock.nodes.toypkgs.locked.rev')"
@@ -246,7 +258,7 @@ expect_log "host b	HELD since"
 
 step "r5: linux is fixed and gone is back: b is released, a unpins"
 revision fixed false 5 ok
-nixheal_ update || fail "nixheal update gave up on r5"
+nixheal_ switch --update || fail "nixheal update gave up on r5"
 expect_log "released host b"
 expect_log "unpinned host a: toypkgs.gone: builds again"
 expect_pins a ""
@@ -266,7 +278,7 @@ cp "$sys/flake.lock" "$work/before.lock"
 cp "$sys/pins.json" "$work/before.json"
 before_commits="$(commits)"
 before_calls="$(nh_calls)"
-if nixheal_ update; then fail "nixheal update should have given up on r6"; fi
+if nixheal_ switch --update; then fail "nixheal update should have given up on r6"; fi
 expect_log "giving up on host a"
 expect_log "restored flake.lock and pins.json"
 cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored"
@@ -276,7 +288,7 @@ cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored"
 write_config ""
 
 step "r6 dry run, quiet: shows the hello pins and nothing else, writes nothing"
-nixheal_ -q update --dry-run || fail "the dry run gave up"
+nixheal_ -q switch --update --dry-run || fail "the dry run gave up"
 reject_log "round 1:"
 expect_log "dry run: would have pinned host a: toypkgs.hello"
 expect_log "dry run: would have pinned host b: toypkgs.hello"
@@ -297,12 +309,12 @@ nixheal_ clear hello || fail "nixheal clear failed"
 expect_log "cleared host a: toypkgs.hello"
 expect_pins a ""
 
-step "fleet: gone removed and denylisted; with --no-switch a, the local host, is held and b moves on"
+step "fleet: gone removed and denylisted; with --hold-local a, the local host, is held and b moves on"
 write_config '"gone"'
 revision fixed true 7 ok
 before_calls="$(nh_calls)"
 before_commits="$(commits)"
-nixheal_ update --no-switch --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
+nixheal_ build --update --hold-local --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
 expect_log "held host a on its last good lock"
 reject_log "giving up on host a"
 case "$(held_reason a)" in *"gone fails but is never pinned"*) ;; *) fail "a should be held for gone: $(held_reason a)" ;; esac
@@ -331,5 +343,48 @@ nixheal_ merge "$work/newer.json" || fail "merge failed"
 expect_log "took host b from"
 expect_pins b "toypkgs.newer"
 case "$(held_reason a)" in *"gone"*) ;; *) fail "merge lost a's held entry" ;; esac
+
+step "build: a builds, --built-link points at it, nothing is activated"
+printf '{"version":2}\n' >"$sys/pins.json"
+write_config ""
+revision fixed false 8 ok
+before_calls="$(nh_calls)"
+nixheal_ build --update --built-link "$work/built" || fail "nixheal build gave up"
+want_a="$(nix eval --raw "$sys#nixosConfigurations.a.config.system.build.toplevel.outPath")"
+[ "$(readlink "$work/built")" = "$want_a" ] || fail "--built-link does not point at a's system: $(readlink "$work/built")"
+[ "$(nh_calls)" = "$before_calls" ] || fail "nixheal build activated something"
+expect_built a hello-8
+
+step "build: without --hold-local a failing local host gives up and removes --built-link"
+write_config '"hello"'
+revision fixed false broken ok
+cp "$sys/flake.lock" "$work/before.lock"
+if nixheal_ build --update --built-link "$work/built"; then fail "nixheal build should have given up"; fi
+expect_log "giving up on host a"
+[ -e "$work/built" ] && fail "--built-link survived a failed build"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored"
+write_config ""
+revision fixed false 9 ok
+nixheal_ build --update || fail "nixheal build gave up on hello-9"
+
+step "boot: nh os boot gets the built system"
+nixheal_ boot || fail "nixheal boot failed"
+want_a="$(nix eval --raw "$sys#nixosConfigurations.a.config.system.build.toplevel.outPath")"
+[ "$(tail -n1 "$calls")" = "nh os boot $want_a" ] || fail "boot did not call nh os boot: $(tail -n1 "$calls")"
+
+step "native switcher: nixos-rebuild switches the flake"
+write_config "" '"switcher": "native"'
+nixheal_ switch || fail "nixheal switch with the native switcher failed"
+[ "$(tail -n1 "$calls")" = "nixos-rebuild switch --flake $sys#a --sudo" ] || fail "nixos-rebuild was not called: $(tail -n1 "$calls")"
+
+step "home: a standalone Home Manager configuration switches through nh home"
+write_home_config
+nixheal_ switch || fail "nixheal switch for the home failed"
+want_home="$(nix eval --raw "$sys#homeConfigurations.alice.activationPackage.outPath")"
+[ "$(tail -n1 "$calls")" = "nh home switch $want_home" ] || fail "nh home switch was not given the home: $(tail -n1 "$calls")"
+expect_log "home alice builds"
+if nixheal_ boot; then fail "boot should refuse a home"; fi
+expect_log "Home Manager has no boot activation"
+write_config ""
 
 printf '\nall e2e steps passed\n'

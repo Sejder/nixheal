@@ -94,17 +94,27 @@ impl Engine {
                 break;
             }
             self.write(&original, &states)?;
-            let names: Vec<String> = active.iter().map(|&i| states[i].target.to_string()).collect();
+            let names: Vec<String> = active
+                .iter()
+                .map(|&i| states[i].target.to_string())
+                .collect();
             let pins: usize = active.iter().map(|&i| states[i].entry.len()).sum();
-            log::info(&format!("round {round}: evaluating and building {} with {pins} pin(s)", names.join(", ")));
+            log::info(&format!(
+                "round {round}: evaluating and building {} with {pins} pin(s)",
+                names.join(", ")
+            ));
             let started = std::time::Instant::now();
             self.round(&mut states, &active)?;
-            log::info(&format!("round {round} took {}s", started.elapsed().as_secs()));
+            log::info(&format!(
+                "round {round} took {}s",
+                started.elapsed().as_secs()
+            ));
         }
 
         for st in &mut states {
             if st.status == Status::Active {
-                st.status = Status::Failed(format!("still failing after {} rounds", self.max_rounds));
+                st.status =
+                    Status::Failed(format!("still failing after {} rounds", self.max_rounds));
             }
         }
         self.finish(original, states)
@@ -114,7 +124,10 @@ impl Engine {
         let base = original.entry(target.kind, &target.name).cloned();
         let mut entry = base.clone().unwrap_or_default();
         let held_before = entry.held.take();
-        let held_lock = held_before.as_ref().map(|h| Lock::from_json(&h.lock)).transpose()?;
+        let held_lock = held_before
+            .as_ref()
+            .map(|h| Lock::from_json(&h.lock))
+            .transpose()?;
 
         let mut retrying = BTreeMap::new();
         let pinned: Vec<(String, String, Pin)> = entry
@@ -124,7 +137,9 @@ impl Engine {
             .collect();
         for (input, attr, pin) in pinned {
             if self.new_lock.nar_hash(&input).as_deref() != Some(pin.checked_nar_hash.as_str()) {
-                log::info(&format!("retrying {target}: {input}.{attr}: {input} moved since it was pinned"));
+                log::info(&format!(
+                    "retrying {target}: {input}.{attr}: {input} moved since it was pinned"
+                ));
                 entry.remove(&input, &attr);
                 retrying.insert((input, attr), pin);
             }
@@ -133,13 +148,15 @@ impl Engine {
         entry.lock_last_modified = self.new_lock.last_modified();
 
         let inputs = if self.fallback_inputs.is_empty() {
-            self.nix.attr_names(&target.package_sets()).unwrap_or_else(|e| {
-                log::info(&format!(
-                    "could not list package sets of {target}, assuming only nixpkgs: {}",
-                    e.to_string().lines().last().unwrap_or_default()
-                ));
-                vec!["nixpkgs".into()]
-            })
+            self.nix
+                .attr_names(&target.package_sets())
+                .unwrap_or_else(|e| {
+                    log::info(&format!(
+                        "could not list package sets of {target}, assuming only nixpkgs: {}",
+                        e.to_string().lines().last().unwrap_or_default()
+                    ));
+                    vec!["nixpkgs".into()]
+                })
         } else {
             self.fallback_inputs.clone()
         };
@@ -165,7 +182,9 @@ impl Engine {
         let mut file = original.clone();
         for st in states {
             match (&st.status, &st.base) {
-                (Status::Failed(_), Some(e)) => file.set(st.target.kind, &st.target.name, e.clone()),
+                (Status::Failed(_), Some(e)) => {
+                    file.set(st.target.kind, &st.target.name, e.clone())
+                }
                 (Status::Failed(_), None) => {}
                 _ => file.set(st.target.kind, &st.target.name, st.entry.clone()),
             }
@@ -180,13 +199,20 @@ impl Engine {
         let mut built: Vec<(usize, String)> = Vec::new();
         let mut eval_failed: Vec<(usize, Vec<String>)> = Vec::new();
         for &i in active {
-            match self.nix.drv_path(&states[i].target.output(), &mut monitor)? {
+            match self
+                .nix
+                .drv_path(&states[i].target.output(), &mut monitor)?
+            {
                 Ok(drv) => built.push((i, drv)),
                 Err(msgs) => eval_failed.push((i, msgs)),
             }
         }
         let drvs: Vec<String> = built.iter().map(|(_, d)| d.clone()).collect();
-        let outcome = if drvs.is_empty() { None } else { Some(self.nix.build_drvs(&drvs, &mut monitor)?) };
+        let outcome = if drvs.is_empty() {
+            None
+        } else {
+            Some(self.nix.build_drvs(&drvs, &mut monitor)?)
+        };
         monitor.finish();
 
         if let Some(outcome) = outcome {
@@ -200,10 +226,13 @@ impl Engine {
                 let graph = self.nix.show_drvs(&drvs)?;
                 for (i, top) in &built {
                     let closure = graph.closure(top);
-                    let mine: Vec<&String> = failed.iter().filter(|d| closure.contains(*d)).collect();
+                    let mine: Vec<&String> =
+                        failed.iter().filter(|d| closure.contains(*d)).collect();
                     let st = &mut states[*i];
                     if failed.is_empty() {
-                        st.status = Status::Failed("the build failed without a failure nixheal recognises".into());
+                        st.status = Status::Failed(
+                            "the build failed without a failure nixheal recognises".into(),
+                        );
                     } else if mine.is_empty() {
                         st.status = Status::Done;
                         st.drv = Some(top.clone());
@@ -225,14 +254,20 @@ impl Engine {
                 })
                 .collect();
             if attrs.is_empty() {
-                let why = msgs.first().map_or_else(String::new, |m| logparse::headline(m));
-                st.status = Status::Failed(format!("evaluation fails in a way nixheal cannot pin: {why}"));
+                let why = msgs
+                    .first()
+                    .map_or_else(String::new, |m| logparse::headline(m));
+                st.status = Status::Failed(format!(
+                    "evaluation fails in a way nixheal cannot pin: {why}"
+                ));
                 continue;
             }
             let context = logparse::eval_context(&msgs);
             let mut wanted = Vec::new();
             for attr in attrs {
-                let mut found = self.eval_input(st, &attr)?.map(|input| (input, attr.clone()));
+                let mut found = self
+                    .eval_input(st, &attr)?
+                    .map(|input| (input, attr.clone()));
                 if found.is_none() {
                     for outer in &context {
                         if let Some(input) = self.eval_input(st, outer)? {
@@ -282,7 +317,13 @@ impl Engine {
                 None => return Ok(Err(format!("{drv} is a dependency of nearly everything"))),
             }
         }
-        let matcher = match Matcher::build(&self.nix, graph, &nodes, &st.target.package_sets(), &st.inputs) {
+        let matcher = match Matcher::build(
+            &self.nix,
+            graph,
+            &nodes,
+            &st.target.package_sets(),
+            &st.inputs,
+        ) {
             Ok(m) => m,
             Err(e) => return Ok(Err(format!("matching packages failed: {e:#}"))),
         };
@@ -297,9 +338,14 @@ impl Engine {
                         st.target,
                         graph.display_name(&via)
                     ));
-                    return Ok(Err(format!("{} is not inside any pinnable package", graph.display_name(drv))));
+                    return Ok(Err(format!(
+                        "{} is not inside any pinnable package",
+                        graph.display_name(drv)
+                    )));
                 }
-                Ascent::TooLarge => return Ok(Err(format!("{drv} is a dependency of nearly everything"))),
+                Ascent::TooLarge => {
+                    return Ok(Err(format!("{drv} is a dependency of nearly everything")));
+                }
             };
             for root in &roots {
                 let attrs: BTreeSet<&(String, String)> = matcher.attrs(root).collect();
@@ -331,10 +377,13 @@ impl Engine {
         }
         let old_lock = st.held_lock.as_ref().unwrap_or(&self.old_lock);
         let system = st.system.get_or_init(|| {
-            self.nix.eval_raw(&st.target.system_attr()).unwrap_or_else(|_| self.system.clone())
+            self.nix
+                .eval_raw(&st.target.system_attr())
+                .unwrap_or_else(|_| self.system.clone())
         });
         for input in &st.inputs {
-            let (Some(old), Some(new)) = (old_lock.locked(input), self.new_lock.locked(input)) else {
+            let (Some(old), Some(new)) = (old_lock.locked(input), self.new_lock.locked(input))
+            else {
                 continue;
             };
             if old["narHash"] == new["narHash"] {
@@ -382,15 +431,18 @@ impl Engine {
 
             let pin = match st.retrying.remove(&(w.input.clone(), w.attr.clone())) {
                 Some(mut pin) => {
-                    log::info(&format!("still failing {key}, keeping the pin from {}", pin.since));
+                    log::info(&format!(
+                        "still failing {key}, keeping the pin from {}",
+                        pin.since
+                    ));
                     pin.checked_nar_hash = checked;
                     pin
                 }
                 None => {
                     let old_lock = st.held_lock.as_ref().unwrap_or(&self.old_lock);
-                    let locked = old_lock
-                        .locked(&w.input)
-                        .ok_or_else(|| format!("{} is not an input of the last good lock", w.input))?;
+                    let locked = old_lock.locked(&w.input).ok_or_else(|| {
+                        format!("{} is not an input of the last good lock", w.input)
+                    })?;
                     if locked["narHash"].as_str() == Some(checked.as_str()) {
                         return Err(format!(
                             "{}.{} fails at the last good {} too, so pinning cannot help",
@@ -399,7 +451,10 @@ impl Engine {
                     }
                     st.new_pins += 1;
                     if st.new_pins > self.max_new_pins {
-                        return Err(format!("more than {} new pins needed in one run", self.max_new_pins));
+                        return Err(format!(
+                            "more than {} new pins needed in one run",
+                            self.max_new_pins
+                        ));
                     }
                     log::change(&format!(
                         "pinned {key} at {}: {}",
@@ -424,11 +479,16 @@ impl Engine {
     fn finish(&self, original: PinsFile, states: Vec<State>) -> Result<Report> {
         let mut report = Report::default();
         let local_failure = states.iter().find_map(|st| match &st.status {
-            Status::Failed(reason) if Some(&st.target) == self.local.as_ref() => Some(reason.clone()),
+            Status::Failed(reason) if Some(&st.target) == self.local.as_ref() => {
+                Some(reason.clone())
+            }
             _ => None,
         });
         if let Some(reason) = local_failure {
-            log::change(&format!("giving up on {}: {reason}", st_name(self.local.as_ref())));
+            log::change(&format!(
+                "giving up on {}: {reason}",
+                st_name(self.local.as_ref())
+            ));
             report.local_failure = Some(reason);
             return Ok(report);
         }
@@ -446,7 +506,11 @@ impl Engine {
                     for (input, attr) in st.retrying.keys() {
                         log::change(&format!("unpinned {target}: {input}.{attr}: builds again"));
                     }
-                    report.changes.extend(st.retrying.keys().map(|(i, a)| format!("unpinned {target}: {i}.{a}")));
+                    report.changes.extend(
+                        st.retrying
+                            .keys()
+                            .map(|(i, a)| format!("unpinned {target}: {i}.{a}")),
+                    );
                     if st.held_before.is_some() {
                         log::change(&format!("released {target}: it builds with the new lock"));
                         report.changes.push(format!("released {target}"));
@@ -454,7 +518,9 @@ impl Engine {
                     let previous = st.base.as_ref();
                     for (input, attr, pin) in st.entry.iter() {
                         if previous.and_then(|b| b.get(input, attr)).is_none() {
-                            report.changes.push(format!("pinned {target}: {input}.{attr}"));
+                            report
+                                .changes
+                                .push(format!("pinned {target}: {input}.{attr}"));
                         }
                         self.log_age(&target, input, attr, pin);
                     }
@@ -479,7 +545,10 @@ impl Engine {
                             }
                         }
                     };
-                    log::change(&format!("held {target} on its last good lock since {}: {reason}", held.since));
+                    log::change(&format!(
+                        "held {target} on its last good lock since {}: {reason}",
+                        held.since
+                    ));
                     entry.held = Some(held);
                     file.set(target.kind, &target.name, entry);
                 }
@@ -496,8 +565,13 @@ impl Engine {
                 "pin {target}: {input}.{attr} is {days} days old (warn after {})",
                 self.warn_after_days
             )),
-            Some(days) => log::info(&format!("pin {target}: {input}.{attr} is {days} day(s) old")),
-            None => log::warn(&format!("pin {target}: {input}.{attr} has an unreadable date {:?}", pin.since)),
+            Some(days) => log::info(&format!(
+                "pin {target}: {input}.{attr} is {days} day(s) old"
+            )),
+            None => log::warn(&format!(
+                "pin {target}: {input}.{attr} has an unreadable date {:?}",
+                pin.since
+            )),
         }
     }
 }

@@ -45,6 +45,24 @@
         }
       );
 
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              cargo
+              clippy
+              rustc
+              rustfmt
+              nix-output-monitor
+            ];
+          };
+        }
+      );
+
       checks = forAllSystems (
         system:
         let
@@ -60,7 +78,7 @@
             builtins.toJSON {
               version = 2;
               hosts.test.pins.nixpkgs.hello = pin;
-              homes.mikke.pins.nixpkgs.cowsay = pin;
+              homes.alice.pins.nixpkgs.cowsay = pin;
             }
           );
           prev = {
@@ -90,6 +108,13 @@
                   enable = true;
                   pinsFile = pins;
                   hosts = [ "test" ];
+                  flake = "/home/alice/nixos";
+                  autoUpgrade = {
+                    enable = true;
+                    user = "alice";
+                    operation = "boot";
+                    inputs = [ "nixpkgs" ];
+                  };
                   nixpkgs.extra = {
                     source = nixpkgs;
                     argName = "extra-pkgs";
@@ -117,6 +142,7 @@
             ];
           };
           settings = builtins.fromJSON machine.config.environment.etc."nixheal.json".text;
+          upgrade = machine.config.systemd.services.nixheal-upgrade;
         in
         {
           package = self.packages.${system}.default;
@@ -125,7 +151,7 @@
             assert !((overlay { }) ? cowsay);
             assert overlay { input = "nixpkgs-unstable"; } == { };
             assert overlay { name = "other"; } == { };
-            assert (overlay { kind = "homes"; name = "mikke"; }) ? cowsay;
+            assert (overlay { kind = "homes"; name = "alice"; }) ? cowsay;
             assert overlay { pins = ./does-not-exist.json; } == { };
             assert overlay { pins = null; } == { };
             assert
@@ -152,6 +178,11 @@
             assert settings.self == "test";
             assert settings.kind == "nixos";
             assert settings.quiet == false;
+            assert settings.switcher == "nh";
+            assert upgrade.serviceConfig.User == "alice";
+            assert builtins.match ".*nixheal build --built-link /run/nixheal/system --update nixpkgs" upgrade.serviceConfig.ExecStart != null;
+            assert builtins.match "[+]/nix/store/.*-nixheal-activate" upgrade.serviceConfig.ExecStartPost != null;
+            assert machine.config.systemd.timers.nixheal-upgrade.timerConfig.OnCalendar == "04:40";
             assert settings.inputs == [ "extra" "nixpkgs" ];
             assert builtins.elem machine.config.programs.nixheal.package machine.config.environment.systemPackages;
             pkgs.runCommand "nixheal-module-check" { } "touch $out";

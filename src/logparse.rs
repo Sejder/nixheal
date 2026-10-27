@@ -28,12 +28,14 @@ static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
 });
 static BY_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/pkgs/by-name/[^/]+/([^/]+)/package\.nix$").unwrap());
-static REMOVED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'([^']+)' has been (?:removed|renamed|replaced)").unwrap()
-});
+static REMOVED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"'([^']+)' has been (?:removed|renamed|replaced)").unwrap());
 static VERSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(.+?)-[0-9]").unwrap());
 static TRACE_OPTION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"while evaluating the option `(?:systemd\.(?:user\.)?)?services\."?([A-Za-z0-9_+-]+)"?"#).unwrap()
+    Regex::new(
+        r#"while evaluating the option `(?:systemd\.(?:user\.)?)?services\."?([A-Za-z0-9_+-]+)"?"#,
+    )
+    .unwrap()
 });
 static TRACE_DRV: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"while evaluating derivation '([^']+)'").unwrap());
@@ -54,7 +56,11 @@ pub fn strip_version(name: &str) -> &str {
 /// lists its reasons as "- " items after "Failed assertions:".
 pub fn headline(msg: &str) -> String {
     let msg = strip_ansi(msg);
-    let lines: Vec<&str> = msg.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = msg
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     let informative = |l: &&str| {
         !l.starts_with('\u{2026}')
             && !l.starts_with("at ")
@@ -67,7 +73,12 @@ pub fn headline(msg: &str) -> String {
     {
         return item.trim_start_matches("- ").to_string();
     }
-    let last = lines.iter().rev().find(|l| informative(l)).copied().unwrap_or("");
+    let last = lines
+        .iter()
+        .rev()
+        .find(|l| informative(l))
+        .copied()
+        .unwrap_or("");
     last.strip_prefix("error: ").unwrap_or(last).to_string()
 }
 
@@ -105,7 +116,10 @@ pub fn activity_text(line: &str) -> Option<String> {
     if json["action"] != "start" || !matches!(json["type"].as_u64(), Some(100) | Some(105)) {
         return None;
     }
-    json["text"].as_str().filter(|t| !t.is_empty()).map(strip_ansi)
+    json["text"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(strip_ansi)
 }
 
 /// The text of an error-level message from a `--log-format internal-json` stderr line.
@@ -132,12 +146,16 @@ pub fn parse(messages: &[String]) -> Vec<Failure> {
         for c in CANNOT_BUILD.captures_iter(&msg) {
             found_build = true;
             if !c[2].contains("dependency failed") && !c[2].contains("dependencies failed") {
-                push(Failure::Build { drv: c[1].to_string() });
+                push(Failure::Build {
+                    drv: c[1].to_string(),
+                });
             }
         }
         for c in BUILDER_FAILED.captures_iter(&msg) {
             found_build = true;
-            push(Failure::Build { drv: c[1].to_string() });
+            push(Failure::Build {
+                drv: c[1].to_string(),
+            });
         }
         if found_build {
             continue;
@@ -148,11 +166,20 @@ pub fn parse(messages: &[String]) -> Vec<Failure> {
                 .captures(&c[2])
                 .map(|b| b[1].to_string())
                 .unwrap_or_else(|| strip_version(&c[1]).to_string());
-            push(Failure::Eval { attr, kind: EvalKind::Refused });
+            push(Failure::Eval {
+                attr,
+                kind: EvalKind::Refused,
+            });
         } else if let Some(c) = REMOVED.captures(&msg) {
-            push(Failure::Eval { attr: c[1].to_string(), kind: EvalKind::Removed });
+            push(Failure::Eval {
+                attr: c[1].to_string(),
+                kind: EvalKind::Removed,
+            });
         } else if let Some(c) = MISSING.captures(&msg) {
-            push(Failure::Eval { attr: c[1].to_string(), kind: EvalKind::Missing });
+            push(Failure::Eval {
+                attr: c[1].to_string(),
+                kind: EvalKind::Missing,
+            });
         }
     }
     out
@@ -182,11 +209,14 @@ mod tests {
     fn old_build_failure_format() {
         let msgs = vec![
             "error: builder for '/nix/store/abc-foo-1.0.drv' failed with exit code 2".to_string(),
-            "error: 1 dependencies of derivation '/nix/store/def-bar-1.0.drv' failed to build".to_string(),
+            "error: 1 dependencies of derivation '/nix/store/def-bar-1.0.drv' failed to build"
+                .to_string(),
         ];
         assert_eq!(
             parse(&msgs),
-            vec![Failure::Build { drv: "/nix/store/abc-foo-1.0.drv".into() }]
+            vec![Failure::Build {
+                drv: "/nix/store/abc-foo-1.0.drv".into()
+            }]
         );
     }
 
@@ -195,7 +225,10 @@ mod tests {
         let msgs = fixture_messages(include_str!("../tests/fixtures/eval-missing.jsonl"));
         assert_eq!(
             parse(&msgs),
-            vec![Failure::Eval { attr: "nodejs_18".into(), kind: EvalKind::Missing }]
+            vec![Failure::Eval {
+                attr: "nodejs_18".into(),
+                kind: EvalKind::Missing
+            }]
         );
     }
 
@@ -208,8 +241,14 @@ mod tests {
         assert_eq!(
             parse(&msgs),
             vec![
-                Failure::Eval { attr: "hello".into(), kind: EvalKind::Refused },
-                Failure::Eval { attr: "cuda-merged".into(), kind: EvalKind::Refused },
+                Failure::Eval {
+                    attr: "hello".into(),
+                    kind: EvalKind::Refused
+                },
+                Failure::Eval {
+                    attr: "cuda-merged".into(),
+                    kind: EvalKind::Refused
+                },
             ]
         );
     }
@@ -223,8 +262,14 @@ mod tests {
         assert_eq!(
             parse(&msgs),
             vec![
-                Failure::Eval { attr: "_0verkill".into(), kind: EvalKind::Removed },
-                Failure::Eval { attr: "_1password".into(), kind: EvalKind::Removed },
+                Failure::Eval {
+                    attr: "_0verkill".into(),
+                    kind: EvalKind::Removed
+                },
+                Failure::Eval {
+                    attr: "_1password".into(),
+                    kind: EvalKind::Removed
+                },
             ]
         );
     }
@@ -235,18 +280,34 @@ mod tests {
             .lines()
             .filter_map(activity_text)
             .collect();
-        assert!(started.contains(&"building '/nix/store/w7w5jmhzl1x5489mv05b6ai9994bvzyx-libfoo-1.2.drv'".to_string()));
-        assert!(started.iter().all(|t| t.starts_with("building ") || t.starts_with("copying path ")));
+        assert!(started.contains(
+            &"building '/nix/store/w7w5jmhzl1x5489mv05b6ai9994bvzyx-libfoo-1.2.drv'".to_string()
+        ));
+        assert!(
+            started
+                .iter()
+                .all(|t| t.starts_with("building ") || t.starts_with("copying path "))
+        );
         assert_eq!(
             activity_text(r#"@nix {"action":"start","id":1,"level":4,"parent":0,"text":"copying path '/nix/store/x-a' from 'https://cache.nixos.org'","type":100}"#).as_deref(),
             Some("copying path '/nix/store/x-a' from 'https://cache.nixos.org'")
         );
-        assert_eq!(activity_text(r#"@nix {"action":"start","id":2,"level":0,"parent":0,"text":"","type":102}"#), None);
+        assert_eq!(
+            activity_text(
+                r#"@nix {"action":"start","id":2,"level":0,"parent":0,"text":"","type":102}"#
+            ),
+            None
+        );
     }
 
     #[test]
     fn ignores_non_error_lines() {
-        assert_eq!(error_message(r#"@nix {"action":"msg","level":3,"msg":"these 2 derivations will be built:"}"#), None);
+        assert_eq!(
+            error_message(
+                r#"@nix {"action":"msg","level":3,"msg":"these 2 derivations will be built:"}"#
+            ),
+            None
+        );
         assert_eq!(error_message("plain text"), None);
         assert!(parse(&["error: something unrelated".to_string()]).is_empty());
     }
@@ -269,16 +330,25 @@ mod tests {
         assert_eq!(eval_context(&[msg.clone()]), vec!["open-webui".to_string()]);
         assert_eq!(
             parse(&[msg]),
-            vec![Failure::Eval { attr: "python3.14-posthog".into(), kind: EvalKind::Refused }]
+            vec![Failure::Eval {
+                attr: "python3.14-posthog".into(),
+                kind: EvalKind::Refused
+            }]
         );
         let quoted = "\u{2026} while evaluating the option `services.\"nginx\".virtualHosts':\n\u{2026} while evaluating the option `systemd.user.services.foo.serviceConfig':".to_string();
-        assert_eq!(eval_context(&[quoted]), vec!["foo".to_string(), "nginx".to_string()]);
+        assert_eq!(
+            eval_context(&[quoted]),
+            vec!["foo".to_string(), "nginx".to_string()]
+        );
     }
 
     #[test]
     fn version_stripping() {
         assert_eq!(strip_version("obs-studio-31.0.1"), "obs-studio");
         assert_eq!(strip_version("hello"), "hello");
-        assert_eq!(strip_version("python3.13-requests-2.32"), "python3.13-requests");
+        assert_eq!(
+            strip_version("python3.13-requests-2.32"),
+            "python3.13-requests"
+        );
     }
 }

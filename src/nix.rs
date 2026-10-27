@@ -7,8 +7,6 @@ use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 
-const STORE: &str = "/nix/store/";
-
 pub struct Nix {
     flake: String,
 }
@@ -127,7 +125,9 @@ impl Monitor {
 
 impl Nix {
     pub fn new(flake: &Path) -> Self {
-        Self { flake: flake.display().to_string() }
+        Self {
+            flake: flake.display().to_string(),
+        }
     }
 
     fn installable(&self, attr: &str) -> String {
@@ -148,7 +148,11 @@ impl Nix {
     }
 
     /// The drvPath of `attr`, or the evaluation error messages.
-    pub fn drv_path(&self, attr: &str, monitor: &mut Monitor) -> Result<Result<String, Vec<String>>> {
+    pub fn drv_path(
+        &self,
+        attr: &str,
+        monitor: &mut Monitor,
+    ) -> Result<Result<String, Vec<String>>> {
         let mut cmd = command();
         cmd.args(["eval", "--raw", "--log-format", "internal-json"])
             .arg(self.installable(&format!("{attr}.drvPath")));
@@ -165,13 +169,22 @@ impl Nix {
     /// Build already evaluated derivations in one `--keep-going` run.
     pub fn build_drvs(&self, drvs: &[String], monitor: &mut Monitor) -> Result<BuildOutcome> {
         let mut cmd = command();
-        cmd.args(["build", "--no-link", "--keep-going", "--log-format", "internal-json"]);
+        cmd.args([
+            "build",
+            "--no-link",
+            "--keep-going",
+            "--log-format",
+            "internal-json",
+        ]);
         if monitor.active() {
             cmd.arg("-v");
         }
         cmd.args(drvs.iter().map(|d| format!("{d}^*")));
         let (status, _, errors) = monitor.run(cmd)?;
-        Ok(BuildOutcome { success: status.success(), errors })
+        Ok(BuildOutcome {
+            success: status.success(),
+            errors,
+        })
     }
 
     pub fn show_drvs(&self, drvs: &[String]) -> Result<Graph> {
@@ -181,7 +194,8 @@ impl Nix {
             .stdin(Stdio::null())
             .output()
             .context("spawning nix derivation show")?;
-        Graph::from_show_json(&checked("nix derivation show", out)?)
+        let store = crate::graph::store_dir_of(drvs.first().map_or("", String::as_str));
+        Graph::from_show_json(&checked("nix derivation show", out)?, &store)
     }
 
     pub fn eval_apply(&self, attr: &str, apply: &str) -> Result<Value> {
@@ -239,7 +253,11 @@ pub fn out_path(drv: &str) -> Result<String> {
         .and_then(|o| o.values().next())
         .and_then(|d| d["outputs"]["out"]["path"].as_str())
         .with_context(|| format!("{drv} has no out path"))?;
-    Ok(if path.starts_with('/') { path.to_string() } else { format!("{STORE}{path}") })
+    Ok(if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("{}/{path}", crate::graph::store_dir_of(drv))
+    })
 }
 
 pub fn eval_expr(expr: &str) -> Result<Value> {
@@ -254,7 +272,11 @@ pub fn eval_expr(expr: &str) -> Result<Value> {
 
 /// The last lines of a derivation's build log, if nix kept one.
 pub fn log_tail(drv: &str, lines: usize) -> Option<String> {
-    let out = command().args(["log", drv]).stdin(Stdio::null()).output().ok()?;
+    let out = command()
+        .args(["log", drv])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

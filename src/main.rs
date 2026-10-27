@@ -30,17 +30,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Update the flake inputs, pin and unpin, commit, then switch with nh.
-    Update {
+    /// Pin and unpin until every configured host builds, then commit.
+    Build {
         #[command(flatten)]
-        build: cmd::Build,
-        /// Inputs to update; all of them when none are named.
-        inputs: Vec<String>,
+        build: cmd::BuildArgs,
     },
-    /// Pin and unpin against the current lock, commit, then switch with nh.
+    /// Build, commit, then switch the machine's own host or home.
     Switch {
         #[command(flatten)]
-        build: cmd::Build,
+        build: cmd::BuildArgs,
+    },
+    /// Build, commit, then make the machine's own host boot into it.
+    Boot {
+        #[command(flatten)]
+        build: cmd::BuildArgs,
     },
     /// Merge another pins.json into the flake's; per host, the newer lock wins.
     Merge {
@@ -87,13 +90,19 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     log::set_quiet(cli.quiet);
     let result = match &cli.command {
-        Command::Update { build, inputs } => cmd::reconcile(build, Some(inputs)),
-        Command::Switch { build } => cmd::reconcile(build, None),
+        Command::Build { build } => cmd::reconcile(build, cmd::Activation::None),
+        Command::Switch { build } => cmd::reconcile(build, cmd::Activation::Switch),
+        Command::Boot { build } => cmd::reconcile(build, cmd::Activation::Boot),
         Command::Merge { at, file } => cmd::merge(at, file),
         Command::Status { at, json } => cmd::status(at, *json),
         Command::Why { pick, attr } => cmd::why(pick, attr),
         Command::Pin { pick, attr, input } => cmd::pin(pick, attr, input),
-        Command::Clear { pick, attr, input, held } => cmd::clear(pick, attr.as_deref(), input.as_deref(), *held),
+        Command::Clear {
+            pick,
+            attr,
+            input,
+            held,
+        } => cmd::clear(pick, attr.as_deref(), input.as_deref(), *held),
     };
     result.unwrap_or_else(|e| {
         eprintln!("nixheal: error: {e:#}");

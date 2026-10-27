@@ -26,6 +26,14 @@ pub struct Config {
     pub deny: Vec<String>,
     #[serde(default)]
     pub quiet: bool,
+    /// How to activate: "nh" (the default) or "native", which is
+    /// nixos-rebuild for hosts and home-manager for homes.
+    #[serde(default = "default_switcher")]
+    pub switcher: String,
+}
+
+fn default_switcher() -> String {
+    "nh".into()
 }
 
 fn default_warn_after_days() -> i64 {
@@ -40,7 +48,10 @@ pub struct Target {
 
 impl Target {
     pub fn new(kind: Kind, name: &str) -> Self {
-        Self { kind, name: name.to_string() }
+        Self {
+            kind,
+            name: name.to_string(),
+        }
     }
 
     fn base(&self) -> String {
@@ -136,18 +147,18 @@ mod tests {
     #[test]
     fn parses_module_output() {
         let c = Config::parse(
-            br#"{"kind":"nixos","self":"ideapad","flake":"/home/mikke/nix","hosts":["ideapad","pi"],"homes":["mikke"],"inputs":["nixpkgs","nixpkgs-unstable"],"warnAfterDays":7,"deny":["cuda*"]}"#,
+            br#"{"kind":"nixos","self":"laptop","flake":"/home/alice/nixos","hosts":["laptop","pi"],"homes":["alice"],"inputs":["nixpkgs","nixpkgs-unstable"],"warnAfterDays":7,"deny":["cuda*"]}"#,
         )
         .unwrap();
-        assert_eq!(c.local(), Target::new(Kind::Nixos, "ideapad"));
+        assert_eq!(c.local(), Target::new(Kind::Nixos, "laptop"));
         assert_eq!(c.targets().len(), 3);
         assert_eq!(c.warn_after_days, 7);
-        assert_eq!(c.targets()[2], Target::new(Kind::Home, "mikke"));
+        assert_eq!(c.targets()[2], Target::new(Kind::Home, "alice"));
     }
 
     #[test]
     fn defaults() {
-        let c = Config::parse(br#"{"kind":"home","self":"mikke"}"#).unwrap();
+        let c = Config::parse(br#"{"kind":"home","self":"alice"}"#).unwrap();
         assert_eq!(c.warn_after_days, 14);
         assert!(c.targets().is_empty());
         assert!(c.flake.is_none());
@@ -155,11 +166,20 @@ mod tests {
 
     #[test]
     fn target_attrs() {
-        let h = Target::new(Kind::Nixos, "ideapad");
-        assert_eq!(h.output(), "nixosConfigurations.ideapad.config.system.build.toplevel");
-        assert_eq!(h.package_sets(), "nixosConfigurations.ideapad.config.programs.nixheal.packageSets");
-        assert_eq!(h.to_string(), "host ideapad");
-        let m = Target::new(Kind::Home, "mikke@wsl");
-        assert_eq!(m.output(), "homeConfigurations.\"mikke@wsl\".activationPackage");
+        let h = Target::new(Kind::Nixos, "laptop");
+        assert_eq!(
+            h.output(),
+            "nixosConfigurations.laptop.config.system.build.toplevel"
+        );
+        assert_eq!(
+            h.package_sets(),
+            "nixosConfigurations.laptop.config.programs.nixheal.packageSets"
+        );
+        assert_eq!(h.to_string(), "host laptop");
+        let m = Target::new(Kind::Home, "alice@wsl");
+        assert_eq!(
+            m.output(),
+            "homeConfigurations.\"alice@wsl\".activationPackage"
+        );
     }
 }

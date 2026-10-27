@@ -108,7 +108,10 @@ mod tests {
     #[test]
     fn resolves_root_inputs_through_node_names() {
         assert_eq!(lock().nar_hash("nixpkgs").as_deref(), Some("sha256-A"));
-        assert_eq!(lock().nar_hash("nixpkgs-unstable").as_deref(), Some("sha256-U"));
+        assert_eq!(
+            lock().nar_hash("nixpkgs-unstable").as_deref(),
+            Some("sha256-U")
+        );
         assert_eq!(lock().locked("nixpkgs").unwrap()["rev"], "aaa");
     }
 

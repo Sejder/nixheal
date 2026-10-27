@@ -78,6 +78,39 @@ in
     example = [ "cuda*" ];
     description = "Attributes never to pin, on top of the built-in list. A trailing * matches a prefix.";
   };
+  switcher = mkOption {
+    type = types.enum [
+      "nh"
+      "native"
+    ];
+    default = "nh";
+    description = "How nixheal switch and boot activate: nh, or native (nixos-rebuild for hosts, home-manager for homes).";
+  };
+  autoUpgrade = {
+    enable = lib.mkEnableOption "a timer that updates the flake with nixheal and activates the result";
+    dates = mkOption {
+      type = types.str;
+      default = "04:40";
+      example = "daily";
+      description = "When to run, as a systemd calendar expression.";
+    };
+    randomizedDelaySec = mkOption {
+      type = types.str;
+      default = "45min";
+      description = "Random delay added to each run.";
+    };
+    inputs = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "nixpkgs" ];
+      description = "Flake inputs to update; all of them when empty.";
+    };
+    commit = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Commit flake.lock and pins.json after each run.";
+    };
+  };
   quiet = mkOption {
     type = types.bool;
     default = false;

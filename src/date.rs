@@ -64,7 +64,10 @@ mod tests {
             assert_eq!(parse(&format(days)), Some(days));
         }
         assert_eq!(format(parse("2026-10-27").unwrap()), "2026-10-27");
-        assert_eq!(parse("2024-02-29").unwrap() + 1, parse("2024-03-01").unwrap());
+        assert_eq!(
+            parse("2024-02-29").unwrap() + 1,
+            parse("2024-03-01").unwrap()
+        );
     }
 
     #[test]

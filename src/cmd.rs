@@ -28,16 +28,26 @@ pub struct Where {
 }
 
 #[derive(clap::Args)]
-pub struct Build {
+pub struct BuildArgs {
     #[command(flatten)]
     pub at: Where,
+    /// Run nix flake update first; only the named inputs when given.
+    #[arg(long, num_args = 0.., value_name = "INPUT")]
+    pub update: Option<Vec<String>>,
     /// Show what would be pinned and unpinned, then put every file back.
     #[arg(long)]
     pub dry_run: bool,
-    #[arg(long)]
-    pub no_switch: bool,
+    /// Leave flake.lock and pins.json uncommitted.
     #[arg(long)]
     pub no_commit: bool,
+    /// Hold the machine's own host like any other when it cannot be fixed,
+    /// instead of giving up; for a machine that builds a fleet.
+    #[arg(long)]
+    pub hold_local: bool,
+    /// Point this symlink at the machine's own system once it built, and
+    /// remove it otherwise, so a separate step can activate it.
+    #[arg(long)]
+    pub built_link: Option<PathBuf>,
     /// Only these hosts or homes from the config; repeatable.
     #[arg(long = "only")]
     pub only: Vec<String>,
@@ -56,6 +66,13 @@ pub struct Build {
     /// e.g. for a binary cache to serve them.
     #[arg(long)]
     pub gc_roots: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    None,
+    Switch,
+    Boot,
 }
 
 #[derive(clap::Args)]
@@ -120,32 +137,101 @@ fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<()> {
         && !git.tracked(path)
     {
         git.intent_to_add(path)?;
-        log::info(&format!("added {} to the git index so the flake can see it", path.display()));
+        log::info(&format!(
+            "added {} to the git index so the flake can see it",
+            path.display()
+        ));
     }
     Ok(())
 }
 
-/// Switch with nh. Given the system nixheal just built, nh only diffs and
-/// activates it; otherwise it evaluates and builds the flake itself.
-fn switch(target: &Target, flake: &Path, built: Option<&str>) -> Result<ExitCode> {
-    let mut nh = Command::new("nh");
-    match target.kind {
-        Kind::Nixos => nh.args(["os", "switch"]),
-        Kind::Home => nh.args(["home", "switch"]),
-    };
-    match built {
-        Some(path) => nh.arg(path),
-        None => match target.kind {
-            Kind::Nixos => nh.arg(flake).args(["-H", &target.name]),
-            Kind::Home => nh.arg(flake).args(["-c", &target.name]),
-        },
-    };
-    log::info(&format!("switching {target} with nh"));
-    let status = nh.status().context("running nh; is it installed?")?;
-    Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8) })
+fn is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .map(str::to_string)
+        })
+        .and_then(|l| l.split_whitespace().nth(1).map(|u| u == "0"))
+        .unwrap_or(false)
 }
 
-pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
+/// Activate the built system. With nh it is handed the store path, so it only
+/// diffs and activates; nixos-rebuild and home-manager evaluate the flake again.
+fn activate(
+    target: &Target,
+    flake: &Path,
+    built: Option<&str>,
+    how: Activation,
+    switcher: &str,
+) -> Result<ExitCode> {
+    let verb = match (how, target.kind) {
+        (Activation::None, _) => return Ok(ExitCode::SUCCESS),
+        (Activation::Switch, _) => "switch",
+        (Activation::Boot, Kind::Nixos) => "boot",
+        (Activation::Boot, Kind::Home) => {
+            bail!("Home Manager has no boot activation; use nixheal switch")
+        }
+    };
+    let installable = format!("{}#{}", flake.display(), target.name);
+    let mut cmd = match (switcher, target.kind) {
+        ("native", Kind::Nixos) => {
+            let mut c = Command::new("nixos-rebuild");
+            c.args([verb, "--flake", &installable]);
+            if !is_root() {
+                c.arg("--sudo");
+            }
+            c
+        }
+        ("native", Kind::Home) => {
+            let mut c = Command::new("home-manager");
+            c.args([verb, "--flake", &installable]);
+            c
+        }
+        (_, kind) => {
+            let mut c = Command::new("nh");
+            c.args([if kind == Kind::Nixos { "os" } else { "home" }, verb]);
+            match (built, kind) {
+                (Some(path), _) => c.arg(path),
+                (None, Kind::Nixos) => c.arg(flake).args(["-H", &target.name]),
+                (None, Kind::Home) => c.arg(flake).args(["-c", &target.name]),
+            };
+            c
+        }
+    };
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    log::info(&format!("{verb} {target} with {program}"));
+    let status = cmd
+        .status()
+        .with_context(|| format!("running {program}; is it installed?"))?;
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8)
+    })
+}
+
+/// Point `link` at the built system, replacing whatever was there.
+fn set_built_link(link: &Path, target: Option<&str>) -> Result<()> {
+    match std::fs::remove_file(link) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing {}", link.display()));
+        }
+        _ => {}
+    }
+    if let Some(target) = target {
+        std::os::unix::fs::symlink(target, link)
+            .with_context(|| format!("linking {}", link.display()))?;
+    }
+    Ok(())
+}
+
+pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
+    if let Some(link) = &args.built_link {
+        set_built_link(link, None)?;
+    }
+    let update = args.update.as_deref();
     let ctx = Ctx::open(&args.at, true)?;
     let cfg = ctx.config.clone().expect("config required");
     let mut targets = cfg.targets();
@@ -156,15 +242,16 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         bail!("no hosts or homes to build: set programs.nixheal.hosts or homes");
     }
     let local = Some(cfg.local()).filter(|l| targets.contains(l));
-    // Only a machine that is about to switch must not be held: with
-    // --no-switch, e.g. a fleet build, it is held like any other target.
-    let guarded = local.clone().filter(|_| !args.no_switch);
+    // The machine's own host is given up on, not held, unless it builds a
+    // fleet: holding it would leave it running an old system unnoticed.
+    let guarded = local.clone().filter(|_| !args.hold_local);
 
     let git = Git::open(&ctx.flake);
     let pins_path = ctx.pins_path();
     let lock_path = ctx.flake.join("flake.lock");
     ensure_pins(&pins_path, git.as_ref())?;
-    let orig_lock = std::fs::read(&lock_path).with_context(|| format!("reading {}", lock_path.display()))?;
+    let orig_lock =
+        std::fs::read(&lock_path).with_context(|| format!("reading {}", lock_path.display()))?;
     let orig_pins = std::fs::read(&pins_path)?;
     let restore = || -> Result<()> {
         write_atomic(&lock_path, &orig_lock)?;
@@ -235,13 +322,21 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         for (target, drv) in &report.built {
             nix::add_root(drv, &dir.join(target.root_name()))?;
         }
-        log::info(&format!("rooted {} system(s) in {}", report.built.len(), dir.display()));
+        log::info(&format!(
+            "rooted {} system(s) in {}",
+            report.built.len(),
+            dir.display()
+        ));
     }
 
     if !args.no_commit
         && let Some(git) = &git
     {
-        let title = if update.is_some() { "nixheal: update flake.lock" } else { "nixheal: update pins" };
+        let title = if update.is_some() {
+            "nixheal: update flake.lock"
+        } else {
+            "nixheal: update pins"
+        };
         let mut message = title.to_string();
         if !report.changes.is_empty() {
             message.push_str("\n\n");
@@ -252,24 +347,31 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         }
     }
 
-    match &local {
-        Some(target) if !args.no_switch => {
-            let built = match report.local_drv.as_deref().map(nix::out_path) {
-                Some(Ok(path)) => Some(path),
-                Some(Err(e)) => {
-                    log::info(&format!("letting nh evaluate again: {e:#}"));
-                    None
-                }
-                None => None,
-            };
-            switch(target, &ctx.flake, built.as_deref())
+    let built = match report.local_drv.as_deref().map(nix::out_path) {
+        Some(Ok(path)) => Some(path),
+        Some(Err(e)) => {
+            log::info(&format!("cannot find the built system: {e:#}"));
+            None
         }
-        _ => Ok(ExitCode::SUCCESS),
+        None => None,
+    };
+    if let Some(link) = &args.built_link {
+        set_built_link(link, built.as_deref())?;
+    }
+
+    match &local {
+        Some(target) => activate(target, &ctx.flake, built.as_deref(), how, &cfg.switcher),
+        None if how != Activation::None => {
+            log::info(&format!(
+                "not activating: {} is not among the configured targets",
+                cfg.local()
+            ));
+            Ok(ExitCode::SUCCESS)
+        }
+        None => Ok(ExitCode::SUCCESS),
     }
 }
 
-/// Fold another pins file into the flake's, entry by entry; an entry from a
-/// newer lock wins, as when two runs wrote the same host.
 pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
     let pins_path = ctx.pins_path();
@@ -283,13 +385,25 @@ pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
         }
         if file.merge(kind, name, entry.clone()) {
             taken += 1;
-            log::info(&format!("took {} from {}", Target::new(kind, name), other.display()));
+            log::info(&format!(
+                "took {} from {}",
+                Target::new(kind, name),
+                other.display()
+            ));
         } else {
-            log::info(&format!("kept {}: it comes from a newer lock", Target::new(kind, name)));
+            log::info(&format!(
+                "kept {}: it comes from a newer lock",
+                Target::new(kind, name)
+            ));
         }
     }
     file.save(&pins_path)?;
-    log::info(&format!("merged {} entr{} into {}", taken, if taken == 1 { "y" } else { "ies" }, pins_path.display()));
+    log::info(&format!(
+        "merged {} entr{} into {}",
+        taken,
+        if taken == 1 { "y" } else { "ies" },
+        pins_path.display()
+    ));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -312,7 +426,11 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
         for (input, attr, pin) in entry.iter() {
             any = true;
             let age = date::parse(&pin.since).map(|d| today - d);
-            let flag = if age.is_some_and(|a| a > warn) { "  OLD" } else { "" };
+            let flag = if age.is_some_and(|a| a > warn) {
+                "  OLD"
+            } else {
+                ""
+            };
             println!(
                 "{target}\t{input}.{attr}\t{}\tsince {} ({}d){flag}",
                 pin.reason.as_str(),

@@ -46,7 +46,10 @@ pub fn denied(attr: &str, extra: &[String]) -> bool {
 
 pub fn candidate_names(node: &Node) -> Vec<String> {
     let mut out = Vec::new();
-    for name in [node.pname.as_deref(), Some(strip_version(&node.name))].into_iter().flatten() {
+    for name in [node.pname.as_deref(), Some(strip_version(&node.name))]
+        .into_iter()
+        .flatten()
+    {
         if is_attr_name(name) && !out.iter().any(|n| n == name) {
             out.push(name.to_string());
         }
@@ -117,7 +120,11 @@ impl Matcher {
 
 /// Whether `attr` evaluates to a derivation in the nixpkgs at `locked`.
 pub fn evaluates_at(locked: &Value, system: &str, attr: &str) -> Result<bool> {
-    if !is_attr_name(attr) || !system.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !is_attr_name(attr)
+        || !system
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         bail!("refusing to evaluate unexpected name {attr:?} for {system:?}");
     }
     let json = serde_json::to_string(locked)?;
@@ -154,13 +161,25 @@ mod tests {
         };
         assert_eq!(candidate_names(&node), vec!["obs-studio"]);
 
-        let node = Node { name: "hello-2.12".into(), pname: None, ..Default::default() };
+        let node = Node {
+            name: "hello-2.12".into(),
+            pname: None,
+            ..Default::default()
+        };
         assert_eq!(candidate_names(&node), vec!["hello"]);
 
-        let node = Node { name: "python3.13-requests-2.32".into(), pname: Some("requests".into()), ..Default::default() };
+        let node = Node {
+            name: "python3.13-requests-2.32".into(),
+            pname: Some("requests".into()),
+            ..Default::default()
+        };
         assert_eq!(candidate_names(&node), vec!["requests"]);
 
-        let node = Node { name: "unit-foo.service".into(), pname: None, ..Default::default() };
+        let node = Node {
+            name: "unit-foo.service".into(),
+            pname: None,
+            ..Default::default()
+        };
         assert!(candidate_names(&node).is_empty());
     }
 
