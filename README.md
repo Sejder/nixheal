@@ -108,6 +108,10 @@ cargo build && tests/e2e.sh
  "list":"home: open-webui (3d)","warn_after_days":14,"generated":"2026-10-30"}
 ```
 
+`items` holds one row per pin or held host (`name`, and a `label` such as
+`3d, eval` or `2d, held`, with `, STALE` past `warnAfterDays`), for a
+`dynamic-list` widget. With nothing pinned it holds a single `OK` row.
+
 `status` is the most urgent of `STALE` (a pin or hold older than
 `warnAfterDays`), `HELD`, `PINNED` and `OK`. Ages are computed when it runs,
 so regenerate it regularly, e.g. from the timer that runs nixheal.

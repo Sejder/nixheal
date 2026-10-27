@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 struct Item {
     what: String,
+    kind: &'static str,
     days: Option<i64>,
 }
 
@@ -23,6 +24,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
             held += 1;
             items.push(Item {
                 what: format!("{} held", target.name),
+                kind: "held",
                 days: date::parse(&h.since).map(|d| today - d),
             });
         }
@@ -30,13 +32,15 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
             pins += 1;
             items.push(Item {
                 what: format!("{}: {attr}", target.name),
+                kind: pin.reason.as_str(),
                 days: date::parse(&pin.since).map(|d| today - d),
             });
         }
     }
     items.sort_by_key(|i| std::cmp::Reverse(i.days.unwrap_or(i64::MAX)));
 
-    let stale = items.iter().filter(|i| i.days.is_none_or(|d| d > warn_after_days)).count();
+    let is_stale = |i: &Item| i.days.is_none_or(|d| d > warn_after_days);
+    let stale = items.iter().filter(|i| is_stale(i)).count();
     let status = if stale > 0 {
         "STALE"
     } else if held > 0 {
@@ -54,6 +58,29 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
         items.iter().map(|i| format!("{} ({})", i.what, age(i))).collect::<Vec<_>>().join(", ")
     };
 
+    // One row per pin or hold, for a dynamic-list widget; never empty, so the
+    // widget shows that all is well instead of nothing.
+    let rows: Vec<Value> = if items.is_empty() {
+        vec![json!({ "name": "nothing pinned", "label": "OK", "kind": "none", "days": 0, "stale": false })]
+    } else {
+        items
+            .iter()
+            .map(|i| {
+                let mut label = format!("{}, {}", age(i), i.kind);
+                if is_stale(i) {
+                    label.push_str(", STALE");
+                }
+                json!({
+                    "name": i.what,
+                    "label": label,
+                    "kind": i.kind,
+                    "days": i.days,
+                    "stale": is_stale(i),
+                })
+            })
+            .collect()
+    };
+
     json!({
         "status": status,
         "pins": pins,
@@ -62,6 +89,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
         "oldest": oldest.map_or("-".to_string(), |i| format!("{}, {}", i.what, age(i))),
         "oldest_days": oldest.and_then(|i| i.days).unwrap_or(0),
         "list": list,
+        "items": rows,
         "warn_after_days": warn_after_days,
         "generated": date::format(today),
     })
@@ -96,6 +124,8 @@ mod tests {
         assert_eq!(s["pins"], 0);
         assert_eq!(s["oldest"], "-");
         assert_eq!(s["list"], "nothing pinned");
+        assert_eq!(s["items"][0]["name"], "nothing pinned");
+        assert_eq!(s["items"][0]["label"], "OK");
     }
 
     #[test]
@@ -109,6 +139,10 @@ mod tests {
         assert_eq!(s["oldest"], "home: open-webui, 7d");
         assert_eq!(s["oldest_days"], 7);
         assert_eq!(s["list"], "home: open-webui (7d), pi: sbctl (1d)");
+        assert_eq!(s["items"][0]["name"], "home: open-webui");
+        assert_eq!(s["items"][0]["label"], "7d, eval");
+        assert_eq!(s["items"][1]["name"], "pi: sbctl");
+        assert_eq!(s["items"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -129,5 +163,8 @@ mod tests {
         assert_eq!(s["status"], "STALE");
         assert_eq!(s["stale"], 1);
         assert_eq!(s["oldest"], "mikke: zed-editor, 26d");
+        assert_eq!(s["items"][0]["label"], "26d, eval, STALE");
+        assert_eq!(s["items"][1]["name"], "pi held");
+        assert_eq!(s["items"][1]["label"], "2d, held");
     }
 }
