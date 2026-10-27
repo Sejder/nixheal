@@ -150,5 +150,10 @@ pub fn eval_expr(expr: &str) -> Result<Value> {
 /// The last lines of a derivation's build log, if nix kept one.
 pub fn log_tail(drv: &str, lines: usize) -> Option<String> {
     let out = command().args(["log", drv]).stdin(Stdio::null()).output().ok()?;
-    out.status.success().then(|| tail(&out.stdout, lines))
+    if !out.status.success() {
+        return None;
+    }
+    let text = logparse::strip_ansi(&String::from_utf8_lossy(&out.stdout));
+    let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with("@nix ")).collect();
+    Some(kept[kept.len().saturating_sub(lines)..].join("\n"))
 }
