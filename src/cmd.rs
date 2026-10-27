@@ -49,8 +49,13 @@ pub struct Build {
     /// Give up on a host rather than add more than this many new pins to it.
     #[arg(long, default_value_t = 10)]
     pub max_new_pins: usize,
+    /// Used for eval checks when a target's own system cannot be evaluated.
     #[arg(long, default_value_t = default_system())]
     pub system: String,
+    /// Keep every system that built alive with a GC root in this directory,
+    /// e.g. for a binary cache to serve them.
+    #[arg(long)]
+    pub gc_roots: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -151,6 +156,9 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         bail!("no hosts or homes to build: set programs.autopin.hosts or homes");
     }
     let local = Some(cfg.local()).filter(|l| targets.contains(l));
+    // Only a machine that is about to switch must not be held: with
+    // --no-switch, e.g. a fleet build, it is held like any other target.
+    let guarded = local.clone().filter(|_| !args.no_switch);
 
     let git = Git::open(&ctx.flake);
     let pins_path = ctx.pins_path();
@@ -185,7 +193,7 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         new_lock: Lock::load(&lock_path)?,
         old_lock,
         targets,
-        local: local.clone(),
+        local: guarded,
         fallback_inputs: cfg.inputs.clone(),
         deny: cfg.deny.clone(),
         system: args.system.clone(),
@@ -222,6 +230,14 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
 
     state::save_last_good(&ctx.flake, &engine.new_lock)?;
 
+    if let Some(dir) = &args.gc_roots {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        for (target, drv) in &report.built {
+            nix::add_root(drv, &dir.join(target.root_name()))?;
+        }
+        log::info(&format!("rooted {} system(s) in {}", report.built.len(), dir.display()));
+    }
+
     if !args.no_commit
         && let Some(git) = &git
     {
@@ -250,6 +266,31 @@ pub fn reconcile(args: &Build, update: Option<&[String]>) -> Result<ExitCode> {
         }
         _ => Ok(ExitCode::SUCCESS),
     }
+}
+
+/// Fold another pins file into the flake's, entry by entry; an entry from a
+/// newer lock wins, as when two runs wrote the same host.
+pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
+    let ctx = Ctx::open(at, false)?;
+    let pins_path = ctx.pins_path();
+    ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
+    let mut file = PinsFile::load(&pins_path)?;
+    let incoming = PinsFile::load(other)?;
+    let mut taken = 0;
+    for (kind, name, entry) in incoming.entries() {
+        if file.entry(kind, name) == Some(entry) {
+            continue;
+        }
+        if file.merge(kind, name, entry.clone()) {
+            taken += 1;
+            log::info(&format!("took {} from {}", Target::new(kind, name), other.display()));
+        } else {
+            log::info(&format!("kept {}: it comes from a newer lock", Target::new(kind, name)));
+        }
+    }
+    file.save(&pins_path)?;
+    log::info(&format!("merged {} entr{} into {}", taken, if taken == 1 { "y" } else { "ies" }, pins_path.display()));
+    Ok(ExitCode::SUCCESS)
 }
 
 pub fn status(at: &Where) -> Result<ExitCode> {

@@ -55,12 +55,15 @@ autopin status              # pins and held hosts, with their age
 autopin why <attr>          # failed drv, path up to the package, build log tail
 autopin pin <attr>          # pin by hand at the current lock, kept until cleared
 autopin clear <attr>        # remove a pin; --held releases a held host
+autopin merge <file>        # fold another pins.json in; per host, the newer lock wins
 ```
 
 - `update` and `switch` take `--dry-run`, `--no-commit`, `--no-switch` and `--only <name>`.
 - `-q` / `--quiet` (or `programs.autopin.quiet = true`) prints only pins, unpins, holds, warnings and errors. nh's own output is unchanged.
 - They run in a dirty tree and commit only `flake.lock` and `pins.json`.
 - If the machine's own configuration cannot be fixed, both files are put back. Nothing is committed and nothing is switched.
+- With `--no-switch` nothing local needs protecting, so the machine's own host is held like any other. That is the mode for a fleet build host.
+- `--gc-roots DIR` keeps every system that built alive under `DIR/<host>` (and `DIR/home-<name>`), so a binary cache on that machine keeps serving them. A held host's previous root is left alone.
 
 ## How it decides
 

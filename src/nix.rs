@@ -190,10 +190,33 @@ impl Nix {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    pub fn eval_raw(&self, attr: &str) -> Result<String> {
+        let out = command()
+            .args(["eval", "--raw"])
+            .arg(self.installable(attr))
+            .stdin(Stdio::null())
+            .output()
+            .context("spawning nix eval")?;
+        let bytes = checked(&format!("nix eval {attr}"), out)?;
+        Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+    }
+
     pub fn attr_names(&self, attr: &str) -> Result<Vec<String>> {
         let v = self.eval_apply(attr, "builtins.attrNames")?;
         Ok(serde_json::from_value(v)?)
     }
+}
+
+/// Keep a built derivation alive with a GC root at `link`.
+pub fn add_root(drv: &str, link: &Path) -> Result<()> {
+    let out = command()
+        .args(["build", "--out-link"])
+        .arg(link)
+        .arg(format!("{drv}^out"))
+        .stdin(Stdio::null())
+        .output()
+        .context("spawning nix build")?;
+    checked(&format!("rooting {drv}"), out).map(|_| ())
 }
 
 /// The `out` path of a built derivation, read from the drv itself.

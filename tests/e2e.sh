@@ -297,4 +297,39 @@ autopin_ clear hello || fail "autopin clear failed"
 expect_log "cleared host a: toypkgs.hello"
 expect_pins a ""
 
+step "fleet: gone removed and denylisted; with --no-switch a, the local host, is held and b moves on"
+write_config '"gone"'
+revision fixed true 7 ok
+before_calls="$(nh_calls)"
+before_commits="$(commits)"
+autopin_ update --no-switch --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
+expect_log "held host a on its last good lock"
+reject_log "giving up on host a"
+case "$(held_reason a)" in *"gone fails but is never pinned"*) ;; *) fail "a should be held for gone: $(held_reason a)" ;; esac
+[ -z "$(held_reason b)" ] || fail "b should not be held"
+[ "$(nh_calls)" = "$before_calls" ] || fail "a fleet run switched"
+[ "$(commits)" = "$before_commits" ] || fail "a --no-commit run committed"
+git -C "$sys" diff --quiet -- flake.lock && fail "the fleet run restored flake.lock"
+[ -L "$work/roots/b" ] || fail "no GC root for b"
+[ -e "$work/roots/a" ] && fail "a GC root for the held host a"
+expect_log "rooted 1 system(s)"
+write_config ""
+
+step "merge: an entry from a newer lock replaces b, one from an older lock does not"
+mkpins() {
+  nix eval --impure --json --expr "
+    let f = builtins.fromJSON (builtins.readFile $sys/pins.json); b = f.hosts.b; in
+    f // { hosts = f.hosts // { b = b // { lockLastModified = b.lockLastModified + ($1); pins.toypkgs.$2 = {
+      locked = { type = \"path\"; path = \"/x\"; narHash = \"sha256-x\"; }; since = \"2026-01-01\"; reason = \"manual\"; checkedNarHash = \"\"; }; }; }; }" >"$3"
+}
+mkpins -100 older "$work/older.json"
+mkpins 100 newer "$work/newer.json"
+autopin_ merge "$work/older.json" || fail "merge failed"
+expect_log "kept host b: it comes from a newer lock"
+expect_pins b ""
+autopin_ merge "$work/newer.json" || fail "merge failed"
+expect_log "took host b from"
+expect_pins b "toypkgs.newer"
+case "$(held_reason a)" in *"gone"*) ;; *) fail "merge lost a's held entry" ;; esac
+
 printf '\nall e2e steps passed\n'

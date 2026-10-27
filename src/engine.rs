@@ -38,6 +38,8 @@ pub struct Report {
     pub local_failure: Option<String>,
     /// The local machine's built system, for switching without evaluating it again.
     pub local_drv: Option<String>,
+    /// Every target that built, with its system's drv.
+    pub built: Vec<(Target, String)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -64,6 +66,7 @@ struct State {
     retrying: BTreeMap<(String, String), Pin>,
     inputs: Vec<String>,
     drv: Option<String>,
+    system: std::cell::OnceCell<String>,
     status: Status,
     new_pins: usize,
 }
@@ -150,6 +153,7 @@ impl Engine {
             retrying,
             inputs,
             drv: None,
+            system: std::cell::OnceCell::new(),
             status: Status::Active,
             new_pins: 0,
         })
@@ -309,6 +313,9 @@ impl Engine {
             return Ok(Some(input.clone()));
         }
         let old_lock = st.held_lock.as_ref().unwrap_or(&self.old_lock);
+        let system = st.system.get_or_init(|| {
+            self.nix.eval_raw(&st.target.system_attr()).unwrap_or_else(|_| self.system.clone())
+        });
         for input in &st.inputs {
             let (Some(old), Some(new)) = (old_lock.locked(input), self.new_lock.locked(input)) else {
                 continue;
@@ -316,8 +323,8 @@ impl Engine {
             if old["narHash"] == new["narHash"] {
                 continue;
             }
-            if resolve::evaluates_at(&old, &self.system, attr)?
-                && !resolve::evaluates_at(&new, &self.system, attr)?
+            if resolve::evaluates_at(&old, system, attr)?
+                && !resolve::evaluates_at(&new, system, attr)?
             {
                 return Ok(Some(input.clone()));
             }
@@ -415,6 +422,9 @@ impl Engine {
                 Status::Done => {
                     if Some(&target) == self.local.as_ref() {
                         report.local_drv = st.drv.clone();
+                    }
+                    if let Some(drv) = &st.drv {
+                        report.built.push((target.clone(), drv.clone()));
                     }
                     for (input, attr) in st.retrying.keys() {
                         log::change(&format!("unpinned {target}: {input}.{attr}: builds again"));

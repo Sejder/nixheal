@@ -41,6 +41,12 @@ enum Command {
         #[command(flatten)]
         build: cmd::Build,
     },
+    /// Merge another pins.json into the flake's; per host, the newer lock wins.
+    Merge {
+        #[command(flatten)]
+        at: cmd::Where,
+        file: std::path::PathBuf,
+    },
     /// List the pins and held hosts.
     Status {
         #[command(flatten)]
@@ -79,6 +85,7 @@ fn main() -> ExitCode {
     let result = match &cli.command {
         Command::Update { build, inputs } => cmd::reconcile(build, Some(inputs)),
         Command::Switch { build } => cmd::reconcile(build, None),
+        Command::Merge { at, file } => cmd::merge(at, file),
         Command::Status { at } => cmd::status(at),
         Command::Why { pick, attr } => cmd::why(pick, attr),
         Command::Pin { pick, attr, input } => cmd::pin(pick, attr, input),

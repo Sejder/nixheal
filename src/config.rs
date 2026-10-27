@@ -57,6 +57,19 @@ impl Target {
         }
     }
 
+    /// The system the configuration is built for, e.g. aarch64-linux for a Pi.
+    pub fn system_attr(&self) -> String {
+        format!("{}.pkgs.stdenv.hostPlatform.system", self.base())
+    }
+
+    /// The name of this target's GC root under --gc-roots.
+    pub fn root_name(&self) -> String {
+        match self.kind {
+            Kind::Nixos => self.name.clone(),
+            Kind::Home => format!("home-{}", self.name),
+        }
+    }
+
     pub fn package_sets(&self) -> String {
         format!("{}.config.programs.autopin.packageSets", self.base())
     }
