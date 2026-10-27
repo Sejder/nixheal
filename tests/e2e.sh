@@ -248,7 +248,7 @@ expect_pins b ""
 
 step "r5 quiet switch: nothing changes, so nothing is printed"
 autopin_ switch --quiet || fail "the quiet switch gave up"
-reject_log "round 1"
+reject_log "round 1:"
 reject_log "builds"
 [ -z "$(grep 'autopin:' "$log" || true)" ] || fail "the quiet switch printed: $(cat "$log")"
 
@@ -270,7 +270,7 @@ write_config ""
 
 step "r6 dry run, quiet: shows the hello pins and nothing else, writes nothing"
 autopin_ -q update --dry-run || fail "the dry run gave up"
-reject_log "round 1"
+reject_log "round 1:"
 expect_log "dry run: would have pinned host a: toypkgs.hello"
 expect_log "dry run: would have pinned host b: toypkgs.hello"
 cmp -s "$sys/flake.lock" "$work/before.lock" || fail "the dry run changed flake.lock"

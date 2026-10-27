@@ -91,8 +91,10 @@ impl Engine {
             self.write(&original, &states)?;
             let names: Vec<String> = active.iter().map(|&i| states[i].target.to_string()).collect();
             let pins: usize = active.iter().map(|&i| states[i].entry.len()).sum();
-            log::info(&format!("round {round}: building {} with {pins} pin(s)", names.join(", ")));
+            log::info(&format!("round {round}: evaluating and building {} with {pins} pin(s)", names.join(", ")));
+            let started = std::time::Instant::now();
             self.round(&mut states, &active)?;
+            log::info(&format!("round {round} took {}s", started.elapsed().as_secs()));
         }
 
         for st in &mut states {
@@ -169,9 +171,24 @@ impl Engine {
     }
 
     fn round(&self, states: &mut [State], active: &[usize]) -> Result<()> {
+        // The common case: everything evaluates and builds in one nix build,
+        // which is also what shows the nom view from the start.
+        let outputs: Vec<String> = active.iter().map(|&i| states[i].target.output()).collect();
+        let fast = self.nix.build_outputs(&outputs)?;
+        if fast.success {
+            for &i in active {
+                states[i].status = Status::Done;
+            }
+            return Ok(());
+        }
+        let fast_failed: Vec<String> = build_failures(&fast.errors);
+
+        // Something failed: evaluate each host on its own to tell evaluation
+        // failures apart and to get the drvs the failures are traced in.
         let mut built: Vec<(usize, String)> = Vec::new();
         let mut eval_failed: Vec<(usize, Vec<String>)> = Vec::new();
         for &i in active {
+            log::info(&format!("evaluating {} to trace the failure", states[i].target));
             match self.nix.drv_path(&states[i].target.output())? {
                 Ok(drv) => built.push((i, drv)),
                 Err(msgs) => {
@@ -185,19 +202,20 @@ impl Engine {
 
         if !built.is_empty() {
             let drvs: Vec<String> = built.iter().map(|(_, d)| d.clone()).collect();
-            let outcome = self.nix.build_drvs(&drvs)?;
+            // nix build evaluates every output before it builds anything, so
+            // build failures from the first run mean nothing else stopped it.
+            // Otherwise an evaluation failure kept these drvs from building.
+            let outcome = if !fast_failed.is_empty() && eval_failed.is_empty() {
+                fast
+            } else {
+                self.nix.build_drvs(&drvs)?
+            };
             if outcome.success {
                 for (i, _) in &built {
                     states[*i].status = Status::Done;
                 }
             } else {
-                let failed: Vec<String> = logparse::parse(&outcome.errors)
-                    .into_iter()
-                    .filter_map(|f| match f {
-                        Failure::Build { drv } => Some(drv),
-                        Failure::Eval { .. } => None,
-                    })
-                    .collect();
+                let failed = build_failures(&outcome.errors);
                 let graph = self.nix.show_drvs(&drvs)?;
                 for (i, top) in &built {
                     let closure = graph.closure(top);
@@ -474,6 +492,16 @@ impl Engine {
             None => log::warn(&format!("pin {target}: {input}.{attr} has an unreadable date {:?}", pin.since)),
         }
     }
+}
+
+fn build_failures(errors: &[String]) -> Vec<String> {
+    logparse::parse(errors)
+        .into_iter()
+        .filter_map(|f| match f {
+            Failure::Build { drv } => Some(drv),
+            Failure::Eval { .. } => None,
+        })
+        .collect()
 }
 
 fn st_name(target: Option<&Target>) -> String {
