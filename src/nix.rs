@@ -21,6 +21,7 @@ pub struct BuildOutcome {
 fn command() -> Command {
     let mut c = Command::new("nix");
     c.args(["--extra-experimental-features", "nix-command flakes"]);
+    c.args(["--option", "warn-dirty", "false"]);
     c
 }
 
