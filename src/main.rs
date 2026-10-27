@@ -11,6 +11,7 @@ mod nix;
 mod pins;
 mod resolve;
 mod state;
+mod summary;
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -51,6 +52,9 @@ enum Command {
     Status {
         #[command(flatten)]
         at: cmd::Where,
+        /// Print a flat JSON summary for dashboards instead of the list.
+        #[arg(long)]
+        json: bool,
     },
     /// Show why a package is pinned: the failed drv, the path up to the
     /// package, and the end of the build log.
@@ -86,7 +90,7 @@ fn main() -> ExitCode {
         Command::Update { build, inputs } => cmd::reconcile(build, Some(inputs)),
         Command::Switch { build } => cmd::reconcile(build, None),
         Command::Merge { at, file } => cmd::merge(at, file),
-        Command::Status { at } => cmd::status(at),
+        Command::Status { at, json } => cmd::status(at, *json),
         Command::Why { pick, attr } => cmd::why(pick, attr),
         Command::Pin { pick, attr, input } => cmd::pin(pick, attr, input),
         Command::Clear { pick, attr, input, held } => cmd::clear(pick, attr.as_deref(), input.as_deref(), *held),

@@ -52,6 +52,7 @@ so nixheal keeps working when the updated flake no longer evaluates.
 nixheal update [INPUT...]   # nix flake update, pin/unpin, commit, nh switch
 nixheal switch              # pin/unpin against the current lock, commit, nh switch
 nixheal status              # pins and held hosts, with their age
+nixheal status --json       # one flat JSON object for a dashboard widget
 nixheal why <attr>          # failed drv, path up to the package, build log tail
 nixheal pin <attr>          # pin by hand at the current lock, kept until cleared
 nixheal clear <attr>        # remove a pin; --held releases a held host
@@ -96,3 +97,17 @@ cargo test
 nix flake check
 cargo build && tests/e2e.sh
 ```
+
+## Dashboards
+
+`nixheal status --json` prints one flat object a homepage-dashboard
+`customapi` widget (or anything else) can read:
+
+```json
+{"status":"PINNED","pins":1,"held":0,"stale":0,"oldest":"home: open-webui, 3d","oldest_days":3,
+ "list":"home: open-webui (3d)","warn_after_days":14,"generated":"2026-10-30"}
+```
+
+`status` is the most urgent of `STALE` (a pin or hold older than
+`warnAfterDays`), `HELD`, `PINNED` and `OK`. Ages are computed when it runs,
+so regenerate it regularly, e.g. from the timer that runs nixheal.

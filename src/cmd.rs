@@ -293,11 +293,15 @@ pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn status(at: &Where) -> Result<ExitCode> {
+pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
     let file = PinsFile::load(&ctx.pins_path())?;
     let today = date::today();
     let warn = ctx.config.as_ref().map_or(14, |c| c.warn_after_days);
+    if json {
+        println!("{}", crate::summary::summary(&file, today, warn));
+        return Ok(ExitCode::SUCCESS);
+    }
     let mut any = false;
     for (kind, name, entry) in file.entries() {
         let target = Target::new(kind, name);
