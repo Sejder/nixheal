@@ -5,10 +5,10 @@ use crate::lock::Lock;
 use crate::logparse::{self, Failure};
 use crate::nix::Nix;
 use crate::resolve::{self, Matcher};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 const ASCENT_CAP: usize = 20_000;
 
@@ -74,7 +74,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         .canonicalize()
         .with_context(|| format!("resolving {}", args.flake.display()))?;
     let path = args.failures.clone().unwrap_or_else(|| flake.join("failures.json"));
-    let original = std::fs::read(&path).ok();
+    ensure_present(&path, &flake)?;
+    let original = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
 
     let mut inputs = Vec::new();
     for (input, _) in &args.pkgs {
@@ -95,7 +96,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
     let result = rounds(&ctx);
     if !matches!(result, Ok(Outcome::Done)) {
-        restore(&path, original.as_deref())?;
+        write_atomic(&path, &original)?;
     }
     match result? {
         Outcome::Done => Ok(ExitCode::SUCCESS),
@@ -107,13 +108,46 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
 }
 
-fn restore(path: &Path, original: Option<&[u8]>) -> Result<()> {
-    match original {
-        Some(bytes) => write_atomic(path, bytes),
-        None => match std::fs::remove_file(path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
-        },
+/// Create an empty failures file when there is none, and make sure a git
+/// flake can see it: flakes ignore untracked files, so an untracked file
+/// would leave the overlay with nothing to apply.
+fn ensure_present(path: &Path, flake: &Path) -> Result<()> {
+    if !path.exists() {
+        Failures::default().save(path)?;
+        eprintln!("autopin: created {}", path.display());
+    }
+
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(flake)
+            .args(args)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let in_work_tree = Command::new("git")
+        .arg("-C")
+        .arg(flake)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !in_work_tree || git(&["ls-files", "--error-unmatch", "--"]) {
+        return Ok(());
+    }
+    if git(&["add", "--intent-to-add", "--"]) {
+        eprintln!("autopin: added {} to the git index so the flake can see it", path.display());
+        Ok(())
+    } else {
+        bail!("{} is untracked and git add failed, so the flake would not see it", path.display())
     }
 }
 

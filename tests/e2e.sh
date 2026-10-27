@@ -145,11 +145,22 @@ cat >"$sys/flake.nix" <<EOF
 }
 EOF
 
-step "r1: everything builds"
+git -C "$sys" init -q -b main
+git -C "$sys" add flake.nix overlay.nix
+git -C "$sys" -c user.name=e2e -c user.email=e2e@localhost commit -qm system
+
+step "r1: everything builds, autopin creates failures.json and git-adds it"
 revision ok false 1
 nix flake lock "$sys"
-expect_built hello-1
+git -C "$sys" add flake.lock
 publish
+[ ! -e "$sys/failures.json" ] || fail "failures.json should not exist yet"
+run_autopin || fail "autopin gave up on r1"
+expect_log "created $sys/failures.json"
+expect_log "added $sys/failures.json to the git index"
+git -C "$sys" ls-files --error-unmatch failures.json >/dev/null || fail "failures.json is not tracked"
+expect_pins ""
+expect_built hello-1
 
 step "r2: libfoo breaks (build) and gone is removed (eval)"
 revision broken true 2

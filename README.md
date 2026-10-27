@@ -12,6 +12,9 @@ the pin when the package builds again.
   records the flake input, the top-level attr, and the `locked` node it last
   built at, copied from the last good `flake.lock`. That keeps
   `builtins.fetchTree` pure.
+- `autopin run` creates the file when it is missing. In a git flake it also
+  runs `git add --intent-to-add` on it, because flakes do not see untracked
+  files.
 - `lib.mkOverlay { failures = ./failures.json; input = "nixpkgs"; }` swaps
   each pinned attr for its copy from the old revision. With no pins it is a
   no-op.
