@@ -154,7 +154,6 @@ in
         };
         Service = {
           Type = "oneshot";
-          TimeoutStartSec = cfg.autoUpgrade.timeout;
           Environment = [
             "PATH=${config.home.profileDirectory}/bin:${
               lib.makeBinPath [
@@ -169,7 +168,11 @@ in
               (lib.getExe cfg.package)
               "switch"
             ]
-            ++ [ (if upCommit then "--commit" else "--no-commit") ]
+            ++ [
+              (if upCommit then "--commit" else "--no-commit")
+              "--timeout"
+              cfg.autoUpgrade.timeout
+            ]
             ++ [ "--update" ]
             ++ cfg.autoUpgrade.inputs
           );

@@ -250,7 +250,9 @@ impl PinsFile {
     pub fn merge(&mut self, kind: Kind, name: &str, mut entry: Entry) -> bool {
         let section = self.section_mut(kind);
         if let Some(existing) = section.get(name) {
-            if existing.recency() > entry.recency() {
+            // A tie keeps the entry here: the same lock, and a local change
+            // (a clear or a retry) is deliberate.
+            if existing.recency() >= entry.recency() {
                 return false;
             }
             for (input, attr, pin) in existing.iter() {
@@ -271,6 +273,21 @@ impl PinsFile {
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    // A symlinked file (pins.json kept elsewhere) is written where it points,
+    // so the link stays a link.
+    let resolved;
+    let path = if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        resolved = path
+            .canonicalize()
+            .with_context(|| format!("resolving {}", path.display()))?;
+        resolved.as_path()
+    } else {
+        path
+    };
 
     let name = path
         .file_name()
@@ -381,7 +398,7 @@ mod tests {
             f.entry(Kind::Nixos, "laptop").unwrap().lock_last_modified,
             10
         );
-        assert!(f.merge(Kind::Nixos, "laptop", entry(10)));
+        assert!(!f.merge(Kind::Nixos, "laptop", entry(10)));
         assert!(f.merge(Kind::Nixos, "laptop", entry(20)));
         assert_eq!(
             f.entry(Kind::Nixos, "laptop").unwrap().lock_last_modified,
@@ -461,6 +478,21 @@ mod tests {
             e.same_failure("nixpkgs-small", "cloudflared"),
             ["nixpkgs-small"]
         );
+    }
+
+    #[test]
+    fn write_atomic_writes_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("nixheal-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.json");
+        let link = dir.join("pins.json");
+        std::fs::write(&real, b"old").unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

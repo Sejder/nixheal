@@ -4,7 +4,9 @@ use crate::pins::write_atomic;
 use anyhow::{Context, Result, bail};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 
 /// The files a run must put back if it does not finish: flake.lock and
 /// pins.json as they were, or pins.json removed when the run created it.
@@ -43,7 +45,7 @@ impl Restore {
                 }
             },
         }
-        if (self.pins.is_none() || self.untrack)
+        if self.untrack
             && let Some(git) = Git::open(&self.flake)
         {
             git.forget(&self.pins_path)?;
@@ -70,17 +72,70 @@ pub fn untrack(pid: u32) {
     }
 }
 
+/// Whether `pid` still runs (a zombie has exited and only waits to be reaped).
+fn running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            s.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_string))
+        })
+        .is_some_and(|state| state != "Z" && state != "X")
+}
+
+/// Ask every tracked nix to stop and wait for them (up to ten seconds), so
+/// none writes flake.lock after it was restored.
 fn stop_children() {
-    if let Ok(c) = CHILDREN.lock() {
-        for pid in c.iter() {
-            if let Ok(pid) = i32::try_from(*pid) {
-                // SAFETY: kill(2) only sends a signal; a stale pid is harmless here.
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
-                }
+    let pids: Vec<u32> = CHILDREN.lock().map(|c| c.clone()).unwrap_or_default();
+    for pid in &pids {
+        if let Ok(pid) = i32::try_from(*pid) {
+            // SAFETY: kill(2) only sends a signal; a stale pid is harmless here.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
             }
         }
     }
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until && pids.iter().any(|p| running(*p)) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// After a nix command returned: if the run is being interrupted, wait for
+/// the signal handler, which restores the files and exits.
+pub fn halt_if_interrupted() {
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+static BUILDING: AtomicBool = AtomicBool::new(false);
+static TIMED_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Stop the run's nix commands once `limit` has passed while it still
+/// updates, evaluates or builds; activation afterwards is never cut short.
+pub fn deadline(limit: Duration) {
+    BUILDING.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(limit);
+        if BUILDING.load(Ordering::SeqCst) {
+            TIMED_OUT.store(true, Ordering::SeqCst);
+            stop_children();
+        }
+    });
+}
+
+/// The build part of the run is over; a deadline no longer applies.
+pub fn built() {
+    BUILDING.store(false, Ordering::SeqCst);
+}
+
+pub fn timed_out() -> bool {
+    TIMED_OUT.load(Ordering::SeqCst)
 }
 
 /// Put the files back on SIGINT or SIGTERM while `restore` is armed, so an
@@ -89,6 +144,9 @@ fn stop_children() {
 pub fn arm(restore: Restore) {
     HANDLER.call_once(|| {
         let _ = ctrlc::set_handler(|| {
+            // Said first, so the main thread, seeing its nix die, waits for
+            // this handler instead of reporting a failed build.
+            INTERRUPTED.store(true, Ordering::SeqCst);
             stop_children();
             // Exit while still holding the lock, so a write the main thread
             // is waiting to make in `critical` never lands after the restore.
@@ -124,6 +182,30 @@ pub fn settle<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
         *armed = None;
     }
     result
+}
+
+/// For a panic: put the files back if no other thread is in the middle of
+/// writing them (that one panicking would otherwise wait for itself).
+pub fn restore_after_panic() {
+    if let Ok(mut armed) = ARMED.try_lock()
+        && let Some(r) = armed.take()
+    {
+        match r.apply() {
+            Ok(true) => log::change("restored flake.lock and pins.json"),
+            Ok(false) => {}
+            Err(e) => log::warn(&format!("restoring flake.lock and pins.json failed: {e:#}")),
+        }
+    }
+}
+
+/// Put the files back without saying so, for a dry run, whose closing line
+/// already says nothing was written.
+pub fn restore_quietly() -> Result<()> {
+    let taken = ARMED.lock().ok().and_then(|mut a| a.take());
+    if let Some(r) = taken {
+        r.apply()?;
+    }
+    Ok(())
 }
 
 /// Put the files back now, and stop guarding them. Says so when anything

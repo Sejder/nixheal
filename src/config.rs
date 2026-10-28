@@ -172,7 +172,7 @@ pub fn read(path: &Path) -> Result<Config> {
 /// What `nixheal` with no config at all says.
 pub fn missing() -> anyhow::Error {
     anyhow::anyhow!(
-        "no nixheal config: enable programs.nixheal (it writes /etc/nixheal.json or ~/.config/nixheal.json), or pass --config"
+        "no nixheal config: set programs.nixheal.enable and hosts (or homes) and switch once, which writes /etc/nixheal.json (~/.config/nixheal.json for Home Manager), or pass --config FILE"
     )
 }
 

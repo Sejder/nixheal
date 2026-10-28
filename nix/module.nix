@@ -212,7 +212,6 @@ in
         };
         serviceConfig = {
           Type = "oneshot";
-          TimeoutStartSec = up.timeout;
           User = up.user;
           RuntimeDirectory = "nixheal";
           ExecStart = lib.escapeShellArgs (
@@ -222,7 +221,11 @@ in
               "--built-link"
               builtLink
             ]
-            ++ [ (if upCommit then "--commit" else "--no-commit") ]
+            ++ [
+              (if upCommit then "--commit" else "--no-commit")
+              "--timeout"
+              up.timeout
+            ]
             ++ [ "--update" ]
             ++ up.inputs
           );

@@ -109,7 +109,7 @@ in
     timeout = mkOption {
       type = types.str;
       default = "12h";
-      description = "Stop a run that takes longer than this, e.g. one stuck on a hung download; a systemd time span.";
+      description = "Stop updating, evaluating and building after this long, e.g. one stuck on a hung download, as with --timeout (e.g. 12h, 45min, 90s); activation is never cut short.";
     };
     inputs = mkOption {
       type = types.listOf types.str;

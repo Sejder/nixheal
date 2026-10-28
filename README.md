@@ -18,12 +18,12 @@ and undoes it by itself:
 ```
 $ nixheal switch --update
 nixheal: flake /home/alice/nixos (config /etc/nixheal.json)
-nixheal: round 1: evaluating and building host laptop with 0 pinned package(s)
+nixheal: round 1: evaluating and building host laptop
 nixheal: pinned host laptop: sbctl (nixpkgs) at 718f670e8453 from 2026-10-20: sbctl-0.18 failed to build
-nixheal: the errors above were handled: pinned 1 package(s), building again
-nixheal: round 2: evaluating and building host laptop with 1 pinned package(s)
+nixheal: the errors above were handled: pinned 1 package, building again
+nixheal: round 2: evaluating and building host laptop with 1 pinned package
 nixheal: host laptop builds
-nixheal: done: 1 built, 1 pinned; flake.lock and pins.json changed but not committed (...)
+nixheal: done: 1 built, 1 pinned; flake.lock and pins.json have uncommitted changes (commit them, pass --commit, or set programs.nixheal.commit = true)
 nixheal: switching host laptop with nh
 ...
 $ nixheal switch --update          # a few days later, sbctl is fixed upstream
@@ -171,16 +171,19 @@ daemon went away, the disk is full) says nothing about any host, so the run
 stops and restores the files.
 
 **Last good lock.** The lock a target last built with, kept per flake and
-target under `$XDG_STATE_HOME/nixheal`. For a target that has not built yet,
+target under `$XDG_STATE_HOME/nixheal` together with the pins it built with:
+a lock is only good with those pins. A package that was pinned then and fails
+again is pinned to the same revision, even if its pin was cleared or the
+run's changes were thrown away since. For a target that has not built yet,
 the last lock any target of the flake built with, then the current
 `flake.lock`.
 
 **Retry.** Each pin records the input revision it was last tried at. When that
 input moves, the pin (with the package's pins in other sets from the same
 failure) is dropped for the next build; if the package builds, the pin is
-gone, otherwise it comes back with its original date. `nixheal clear` on such
-a pin asks for the same retry without waiting for the input to move. Manual
-pins (`nixheal pin`) are never retried.
+gone, otherwise it comes back with its original date. `nixheal retry` asks
+for the same without waiting for the input to move. Manual pins
+(`nixheal pin`) are never retried.
 
 ## Commands
 
@@ -194,8 +197,8 @@ The verbs follow `nh` and `nixos-rebuild`:
 | `nixheal status [--json]` | pinned packages and held hosts with their age |
 | `nixheal why <attr>` | the failed derivation (or the evaluation error), the path up to the pinned package, the end of the build log |
 | `nixheal pin <attr> [--input I] [--old-lock FILE]` | pin by hand (in `programs.nixheal.input` by default), at the current lock or at the input's revision in `FILE`, e.g. a `flake.lock` from git history for a package that builds but misbehaves; kept until cleared |
-| `nixheal clear <attr> [--input I]` (or `unpin`) | remove a pin made by hand; for a pin nixheal made, have the next run retry it: the pin goes if the package builds, and stays at its revision if it still fails |
-| `nixheal clear <attr> --drop` | remove a pin nixheal made outright. If the package still fails, a run can only pin it again once its package set moves; until then the host is held (this machine's own run gives up) |
+| `nixheal retry <attr> [--input I]` | have the next run retry a pin nixheal made: the pin goes if the package builds, and stays at its revision if it still fails; `status` shows it as "retry queued" |
+| `nixheal clear <attr> [--input I]` (or `unpin`) | remove a pin; if the package still fails, the next run pins it again at the revision it last built with |
 | `nixheal clear --held` | release a held host or home: drop its held lock, so machines that skip held entries update again, and the next run builds it with the current lock |
 | `nixheal merge <file>` | fold another `pins.json` in; per host or home, the entry from the newer lock wins, keeping pins made by hand here |
 
@@ -225,8 +228,9 @@ Options of `build`, `switch` and `boot`:
 | `--no-commit` | leave them uncommitted, whatever `programs.nixheal.commit` says (the default otherwise) |
 | `--only NAME` | build only some of the configured hosts and homes; repeatable or comma-separated, and `host:NAME` or `home:NAME` where a host and a home share a name |
 | `--hold-local` | hold this machine's own host like any other instead of giving up; for a machine that builds a fleet |
-| `--gc-roots DIR` | keep every system that built alive under `DIR/nixheal-host-<host>` and `DIR/nixheal-home-<name>`, e.g. for a binary cache; without `--only`, the roots this flake's runs made for targets no longer configured are removed (they are listed in a hidden file there), and nothing else in `DIR` is touched |
+| `--gc-roots DIR` | keep every system that built alive under `DIR/nixheal-host-<host>` and `DIR/nixheal-home-<name>`, e.g. for a binary cache; without `--only`, the roots this flake's runs made for targets no longer configured are removed (they are listed in a hidden file there), and nothing else in `DIR` is touched. Give each flake its own `DIR`: a second flake rooting a target of the same name there is refused |
 | `--fail-on-hold` | exit with 3 when a host or home is held |
+| `--timeout DURATION` | stop updating, evaluating and building after this long (`12h`, `45min`, `90s`); the files are restored and activation is never cut short |
 | `--built-link PATH` | a GC root pointing at this machine's built system, removed when it did not build, so a separate step can activate it |
 | `--old-lock FILE` | the lock to pin back to, instead of the last good one |
 | `--max-rounds N` | give up after N build rounds (8) |
@@ -246,8 +250,8 @@ is an error before anything builds.
 
 Exit codes: 0 when everything built or was held, 1 when nixheal gave up on this
 machine's own host, 2 on errors, 3 with `--fail-on-hold` when something is
-held, 130 when interrupted. After a successful build,
-`switch` and `boot` return the exit code of the switcher.
+held, 4 when `switch` or `boot` built but the switcher failed (the build and
+the files are kept), 130 when interrupted. A run stopped by `--timeout` is an error (2).
 
 The settings come from `$NIXHEAL_CONFIG`, then `~/.config/nixheal.json`
 (Home Manager), then `/etc/nixheal.json` (NixOS), whichever exists first. The
@@ -289,7 +293,7 @@ required, the rest default as the module options do):
 | `autoUpgrade.operation` | `"switch"` | NixOS only: `"switch"` or `"boot"` |
 | `autoUpgrade.user` | (required) | NixOS only: the owner of the checkout, who updates, builds and commits |
 | `autoUpgrade.onFailure` | `[ ]` | units to start when a run fails |
-| `autoUpgrade.timeout` | `"12h"` | stop a run that takes longer, e.g. one stuck on a hung download |
+| `autoUpgrade.timeout` | `"12h"` | stop updating and building after this long (`--timeout`, e.g. `12h`, `45min`); activation is never cut short |
 
 The settings are written to `/etc/nixheal.json` (NixOS) or
 `~/.config/nixheal.json` (Home Manager), so nixheal keeps working when the
@@ -374,14 +378,22 @@ The text `nixheal status`:
 ```
 flake /home/alice/nixos
 TARGET       PACKAGE (SETS)                          REASON           SINCE
-host laptop  open-webui (nixpkgs, nixpkgs-unstable)  failed to build  2026-10-20 (8d)
+host laptop  open-webui (nixpkgs, nixpkgs-unstable)  failed to build  2026-10-20 (8d)  at 718f670e8453
 host server  -                                       whole host held  2026-10-01 (27d) STALE
     nixpkgs.linux fails and is on the never-pin list (...)
-1 pinned package(s), 1 held, 1 stale (older than 14 days).
-'nixheal why ATTR' explains a pin, 'nixheal clear ATTR' retries or removes one, 'nixheal clear --held --host NAME' (or --home) releases a hold.
+1 pinned package, 1 held, 1 stale (older than 14 days).
+  nixheal why ATTR       explains a pin
+  nixheal retry ATTR     retries one now, keeping it if the package still fails
+  nixheal clear ATTR     removes one
+  nixheal clear --held   releases a hold (with --host or --home NAME)
 ```
 
 ## Limitations
+
+- **A system that embeds `pins.json` as text** (for example
+  `environment.etc."pins".text = builtins.readFile ./pins.json`) and finished
+  in an early round is not built again for the final file; the next run builds
+  it. Systems that take the flake's source or `pins.json` as a path are.
 
 - **A pin holds back fixes for that package**, security fixes included. That is
   the trade: everything else updates. `warnAfterDays` and `status` make old

@@ -26,6 +26,8 @@ pub struct Engine {
     pub old_lock: Lock,
     /// The lock each target last built with, where it is known.
     pub last_good: HashMap<Target, Lock>,
+    /// The pins each target built with on its last good lock.
+    pub last_good_pins: HashMap<Target, Entry>,
     pub targets: Vec<Target>,
     /// The machine nixheal runs on, when it is one of the targets and must not
     /// be held: its failure aborts the run instead of holding it.
@@ -52,6 +54,8 @@ pub struct Report {
     pub local_drv: Option<String>,
     /// Every target that built, with its system's drv.
     pub built: Vec<(Target, String)>,
+    /// The pins each target that built built with.
+    pub built_pins: Vec<(Target, Entry)>,
     /// The machine's own target was held (only possible with --hold-local).
     pub local_held: bool,
     /// How many targets are held after the run.
@@ -92,6 +96,8 @@ struct State {
     entry: Entry,
     held_before: Option<Held>,
     held_lock: Option<Lock>,
+    /// The pins this target built with on its last good lock.
+    good_pins: Option<Entry>,
     old_lock: Lock,
     retrying: BTreeMap<(String, String), Pin>,
     inputs: Vec<String>,
@@ -259,7 +265,7 @@ impl Engine {
                 .get(&input, &attr)
                 .is_some_and(|p| p.checked_nar_hash.is_empty())
             {
-                "nixheal clear asked for a retry".to_string()
+                "a retry was asked for (nixheal retry)".to_string()
             } else {
                 format!("{input} moved since it was pinned")
             };
@@ -289,6 +295,7 @@ impl Engine {
             entry,
             held_before,
             held_lock,
+            good_pins: self.last_good_pins.get(target).cloned(),
             old_lock,
             retrying,
             inputs,
@@ -620,8 +627,9 @@ impl Engine {
                 Ascent::Roots(r) => r,
                 Ascent::Unpinnable { via } => {
                     log::info(&format!(
-                        "unpinnable on {}: {drv} reaches {} without passing a package",
+                        "unpinnable on {}: {} reaches {} without passing a package",
                         st.target,
+                        graph.display_name(drv),
                         graph.display_name(&via)
                     ));
                     return Ok(Err(format!(
@@ -754,36 +762,72 @@ impl Engine {
                     "{input}.{attr} fails and is on the never-pin list (the built-in core packages, or programs.nixheal.deny)"
                 ));
             }
-            let mut skipped: Vec<String> = Vec::new();
+            // (attr, input, why not) for each set that cannot take the pin.
+            let mut skipped: Vec<(String, String, String)> = Vec::new();
             let mut kept: Vec<String> = Vec::new();
             let mut added: Vec<(String, String, Pin)> = Vec::new();
             for (input, attr) in &w.members {
                 if st.entry.get(input, attr).is_some() {
-                    skipped.push(format!(
-                        "{attr} in {input}: it is already pinned there and still fails"
+                    skipped.push((
+                        attr.clone(),
+                        input.clone(),
+                        "it is pinned there already and still fails".into(),
                     ));
                     continue;
                 }
                 let Some(checked) = self.new_lock.nar_hash(input) else {
-                    skipped.push(format!("{attr} in {input}: {input} is not in the new lock"));
+                    skipped.push((
+                        attr.clone(),
+                        input.clone(),
+                        format!("{input} is not in the new lock"),
+                    ));
                     continue;
                 };
                 if let Some(mut pin) = st.retrying.remove(&(input.clone(), attr.clone())) {
                     pin.checked_nar_hash = checked;
+                    if w.failed_drv.is_some() || w.error.is_some() {
+                        pin.failed_drv = w.failed_drv.clone();
+                        pin.trail = w.trail.clone();
+                        pin.error = w.error.clone();
+                    }
                     kept.push(format!("{input} (since {})", pin.since));
                     st.entry.insert(input, attr, pin);
                     continue;
                 }
+                // Pinned when this target last built: that revision is the one
+                // known to work, whatever the last good lock itself says (the
+                // package may have been broken there too, and built only
+                // because of this pin).
+                if let Some(mut pin) = st
+                    .good_pins
+                    .as_ref()
+                    .and_then(|e| e.get(input, attr))
+                    .filter(|p| p.reason != Reason::Manual)
+                    .cloned()
+                {
+                    pin.checked_nar_hash = checked;
+                    pin.failed_drv = w.failed_drv.clone();
+                    pin.trail = w.trail.clone();
+                    pin.error = w.error.clone();
+                    added.push((input.clone(), attr.clone(), pin));
+                    continue;
+                }
                 let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
                 let Some(locked) = old_lock.locked(input) else {
-                    skipped.push(format!(
-                        "{attr} in {input}: {input} is not in the last good lock"
+                    skipped.push((
+                        attr.clone(),
+                        input.clone(),
+                        format!("{input} is not in the lock this host last built with"),
                     ));
                     continue;
                 };
                 if locked["narHash"].as_str() == Some(checked.as_str()) {
-                    skipped.push(format!(
-                        "{attr} in {input}: {input} has not moved since the last good lock, so a pin there would change nothing"
+                    skipped.push((
+                        attr.clone(),
+                        input.clone(),
+                        format!(
+                            "{input} is still at the revision this host last built with, so there is no older revision to pin it to; it is retried once {input} moves"
+                        ),
                     ));
                     continue;
                 }
@@ -802,7 +846,11 @@ impl Engine {
                 ));
             }
             if added.is_empty() && kept.is_empty() {
-                return Err(skipped.join("; "));
+                return Err(skipped
+                    .iter()
+                    .map(|(a, i, why)| format!("{a} ({i}) fails: {why}"))
+                    .collect::<Vec<_>>()
+                    .join("; "));
             }
             let attrs: BTreeSet<&str> = w.members.iter().map(|(_, a)| a.as_str()).collect();
             let name = attrs.into_iter().collect::<Vec<_>>().join(", ");
@@ -817,24 +865,43 @@ impl Engine {
                 st.new_pins += 1;
                 if st.new_pins > self.max_new_pins {
                     return Err(format!(
-                        "it needs more than {} new pin(s) in one run (--max-new-pins)",
+                        "it needs more than {} in one run (--max-new-pins {})",
+                        plural(self.max_new_pins, "new pin"),
                         self.max_new_pins
                     ));
                 }
-                let sets: Vec<&str> = added.iter().map(|(i, _, _)| i.as_str()).collect();
-                log::change(&format!(
-                    "pinned {}: {name} ({}) at {}: {}",
-                    st.target,
-                    sets.join(", "),
-                    describe_dated(&added[0].2.locked),
-                    w.cause
-                ));
+                // One revision for all sets when they agree, else each its own.
+                let revs: BTreeSet<String> = added
+                    .iter()
+                    .map(|(_, _, p)| describe_dated(&p.locked))
+                    .collect();
+                let sets = if revs.len() == 1 {
+                    format!(
+                        "({}) at {}",
+                        added
+                            .iter()
+                            .map(|(i, _, _)| i.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        describe_dated(&added[0].2.locked)
+                    )
+                } else {
+                    format!(
+                        "({})",
+                        added
+                            .iter()
+                            .map(|(i, _, p)| format!("{i} at {}", describe_dated(&p.locked)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                log::change(&format!("pinned {}: {name} {sets}: {}", st.target, w.cause));
                 for (input, attr, pin) in added {
                     st.entry.insert(&input, &attr, pin);
                 }
             }
-            for why in skipped {
-                log::info(&format!("{}: not pinning {why}", st.target));
+            for (a, i, why) in skipped {
+                log::info(&format!("{}: not pinning {a} ({i}): {why}", st.target));
             }
         }
         Ok(())
@@ -910,6 +977,7 @@ impl Engine {
                         }
                         self.log_age(&target, attr, pins[0].1);
                     }
+                    report.built_pins.push((target.clone(), st.entry.clone()));
                     file.set(target.kind, &target.name, st.entry);
                     log::info(&format!("{target} builds"));
                 }
@@ -941,7 +1009,7 @@ impl Engine {
                         String::new()
                     } else {
                         format!(
-                            " (the {} pinned for it in this run {} dropped)",
+                            "; the {} pinned for it in this run {} dropped",
                             plural(dropped, "package"),
                             if dropped == 1 { "was" } else { "were" }
                         )
@@ -967,7 +1035,14 @@ impl Engine {
                         None => {
                             report.changes.push(format!("held {target}: {reason}"));
                             log::change(&format!(
-                                "held {target} on its last good lock: {reason}{dropped}. It is retried on every run; release it by hand with '{release}'"
+                                "held {target} on its last good lock: {reason}{dropped}. It is retried on every run and released once it builds{}",
+                                if log::is_dry_run() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "; after fixing it yourself, '{release}' releases it now"
+                                    )
+                                }
                             ));
                             Held {
                                 since: date::format(self.today),

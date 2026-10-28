@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a sixth review and a fourth review of the command line:
+
+- A lock only counts as last good together with the pins it built with, which
+  are now kept next to it. A package that fails again is pinned to the
+  revision that worked, also after its pin was cleared or a run's uncommitted
+  changes were thrown away; before, it could be pinned to a revision where it
+  was broken too, and this machine's runs gave up until upstream fixed it.
+- New `nixheal retry ATTR` queues a retry of a pin nixheal made (shown as
+  "retry queued" in `status`); `nixheal clear ATTR` (and `unpin`) removes a
+  pin, as its name says. `clear --drop` is gone.
+- An unreadable `pins.json` is an error instead of being removed by the
+  restore, and a restore no longer stages the deletion of a tracked
+  `pins.json`.
+- A switcher that fails is reported, and exits with 4 instead of 1.
+- `--timeout` (and `autoUpgrade.timeout`) stops updating and building only;
+  activation is never cut short. The timers no longer set `TimeoutStartSec`.
+- An interrupt waits for nix to exit before restoring, and a panic restores
+  too.
+- Pinned nixpkgs are imported without the user's own overlays, so
+  `~/.config/nixpkgs/overlays` cannot reach them under `--impure`.
+- `merge` keeps the local entry on a tie, so a local `clear` or `retry` is not
+  undone; `write_atomic` writes through a symlinked `pins.json`; a pin kept on
+  retry records the current failure.
+- Messages: hold reasons say why there is no older revision to pin to, a pin
+  in several sets shows each set's revision when they differ, dry runs no
+  longer print created, added and restored lines, `pin` defaults to the
+  target's own input, `merge` of a `flake.lock` says so, the exit codes in
+  `build --help` and `switch --help` differ, the no-config error says that
+  hosts or homes must be set, `status` shows each pin's revision and lists
+  the next commands on separate lines.
+
 ## 0.1.2
 
 Fixes from four more independent reviews of 0.1.1 and three reviews of its
@@ -129,8 +162,8 @@ Runs:
   restore.
 - The Home Manager `autoUpgrade` with no `homes` is an error, as on NixOS.
 - New `autoUpgrade.timeout` (12h) stops a stuck run.
-- `--gc-roots` lists the roots each flake made, so flakes sharing a directory
-  keep each other's.
+- `--gc-roots` lists the roots each flake made, and refuses a second flake
+  rooting a target of the same name in one directory.
 - `merge` keeps pins made by hand here that the incoming entry lacks.
 - A read-only nixpkgs (`readOnlyPkgs`) gets a warning instead of an error.
 - New `--fail-on-hold`, exiting with 3 when something is held.

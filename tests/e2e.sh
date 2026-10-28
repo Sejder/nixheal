@@ -29,7 +29,7 @@ export GIT_AUTHOR_NAME=e2e GIT_AUTHOR_EMAIL=e2e@localhost
 export GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e2e@localhost
 mkdir -p "$work/bin"
 for tool in nh nixos-rebuild home-manager; do
-  printf '#!/bin/sh\necho "%s $*" >> %s\n' "$tool" "$calls" >"$work/bin/$tool"
+  printf '#!/bin/sh\necho "%s $*" >> %s\n[ -z "$STUB_FAIL" ] || exit 1\n' "$tool" "$calls" >"$work/bin/$tool"
   chmod +x "$work/bin/$tool"
 done
 export PATH="$work/bin:$PATH"
@@ -381,7 +381,7 @@ reject_log "retrying"
 expect_pins a "toypkgs.hello"
 git -C "$sys" log -1 --format=%s | grep -qF "nixheal: update pins" || fail "switch did not commit the manual pin"
 nixheal_ clear hello || fail "nixheal clear failed"
-expect_log "unpinned host a: hello (toypkgs), which was pinned by hand"
+expect_log "unpinned host a: hello (toypkgs); the next build, switch or boot builds it from the current lock"
 expect_pins a ""
 
 step "fleet: gone removed and denylisted; with --hold-local a, the local host, is held and b moves on"
@@ -569,7 +569,7 @@ step "--max-new-pins: a host needing too many new pins is held"
 write_config '"linux"'
 revision broken false broken ok
 nixheal_ build --update --hold-local --no-commit --max-new-pins 1 || fail "the run with --max-new-pins 1 gave up"
-case "$(held_reason b)" in *"more than 1 new pin(s)"*) ;; *) fail "b should be held for needing two pins: $(held_reason b)" ;; esac
+case "$(held_reason b)" in *"more than 1 new pin in one run"*) ;; *) fail "b should be held for needing two pins: $(held_reason b)" ;; esac
 expect_pins a "toypkgs.hello"
 git -C "$sys" checkout -q -- flake.lock pins.json
 write_config ""
@@ -682,7 +682,7 @@ if "$nixheal" why hello --config "$config" 2>"$log"; then fail "why hello on a s
 expect_log "hello is not pinned on host a; it is pinned on host b (pass --host b)"
 if "$nixheal" clear --held hello --config "$config" 2>"$log"; then fail "clear --held with an attr was accepted"; fi
 "$nixheal" clear hello --host b --config "$config" 2>"$log" || fail "clearing hello on b failed"
-expect_log "which was pinned by hand"
+expect_log "the next build, switch or boot builds it from the current lock"
 mkdir -p "$work/nopins"
 "$nixheal" status --flake "$work/nopins" --config "$config" >"$work/stdout" 2>"$log" || fail "status in a directory without pins.json failed"
 grep -qF "no pins.json in $work/nopins" "$work/stdout" || fail "status did not say pins.json is missing: $(cat "$work/stdout")"
@@ -700,7 +700,7 @@ revision broken false 31 ok
 nixheal_ build --update toypkgs || fail "updating only the unused set gave up"
 expect_pins e ""
 nixheal_ build --update toypkgs2 || fail "updating the used set gave up"
-expect_log "e: not pinning app in toypkgs: toypkgs has not moved since the last good lock"
+expect_log "e: not pinning app (toypkgs): toypkgs is still at the revision this host last built with"
 expect_pins e "toypkgs2.app"
 [ -z "$(held_reason e)" ] || fail "e was held although pinning toypkgs2 fixed it: $(held_reason e)"
 
@@ -764,36 +764,65 @@ step "--host with a name that is not configured is refused"
 if "$nixheal" pin hello --host zzz --input toypkgs --config "$config" 2>"$log"; then fail "pin --host zzz succeeded"; fi
 expect_log "host zzz is not a configured host (configured: a, b); check --host"
 
-step "clear on a pin nixheal made retries it; --drop removes it, and the host is held"
+step "retry keeps a pin that still fails; clear removes it and the next run pins it again at the same revision"
 write_config "" "" '"b"'
 revision fixed false 41 ok
-nixheal_ build --update || fail "b did not build before the clear steps"
+nixheal_ build --update || fail "b did not build before the retry steps"
 revision broken false 41 ok
 nixheal_ build --update || fail "pinning app on b gave up"
 expect_pins b "toypkgs.app"
-"$nixheal" clear app --host b --config "$config" 2>"$log" || fail "clear app --host b failed: $(cat "$log")"
+app_rev="$(field b toypkgs app locked.rev)"
+"$nixheal" retry app --host b --config "$config" 2>"$log" || fail "retry app --host b failed: $(cat "$log")"
 expect_log "the next build, switch or boot retries app (toypkgs)"
+"$nixheal" status --config "$config" >"$work/stdout" 2>/dev/null
+grep -qF "retry queued" "$work/stdout" || fail "status does not show the queued retry: $(cat "$work/stdout")"
 nixheal_ build --no-commit || fail "the retry run gave up"
-expect_log "retrying host b: app (toypkgs): nixheal clear asked for a retry"
+expect_log "retrying host b: app (toypkgs): a retry was asked for (nixheal retry)"
 expect_log "app still fails; keeping its pin in toypkgs"
 expect_pins b "toypkgs.app"
 [ -z "$(held_reason b)" ] || fail "b was held after a retry of a pin that still fails: $(held_reason b)"
-"$nixheal" clear app --host b --drop --config "$config" 2>"$log" || fail "clear --drop failed"
-expect_log "until then the host is held"
-nixheal_ build --no-commit || fail "the run after --drop gave up"
-case "$(held_reason b)" in *"has not moved since the last good lock"*) ;; *) fail "b should be held after --drop: $(held_reason b)" ;; esac
+"$nixheal" clear app --host b --config "$config" 2>"$log" || fail "clear app --host b failed"
+expect_log "pins it again at the revision it last built with if it still fails"
+nixheal_ build --no-commit || fail "the run after clear gave up"
+expect_pins b "toypkgs.app"
+[ "$(field b toypkgs app locked.rev)" = "$app_rev" ] || fail "app was pinned again at $(field b toypkgs app locked.rev), not $app_rev"
+[ -z "$(held_reason b)" ] || fail "b was held after clear: $(held_reason b)"
+if "$nixheal" retry hello --host b --config "$config" 2>"$log"; then fail "retry of an attr that is not pinned succeeded"; fi
+expect_log "hello is not pinned on host b"
+
+step "discarding a run's changes does not leave a pin that cannot work"
+git -C "$sys" checkout -q -- flake.lock pins.json
+revision broken false 42 ok
+nixheal_ build --update --no-commit || fail "the run after discarding gave up"
+expect_pins b "toypkgs.app"
+[ "$(field b toypkgs app locked.rev)" = "$app_rev" ] || fail "app was pinned at $(field b toypkgs app locked.rev) after discarding, not $app_rev"
+[ -z "$(held_reason b)" ] || fail "b was held after discarding a run: $(held_reason b)"
 git -C "$sys" checkout -q -- flake.lock pins.json
 
-step "why on a held host says so; clear with the wrong --input names the right one"
-nixheal_ build --no-commit || true
-"$nixheal" clear app --host b --drop --config "$config" 2>/dev/null
+step "retry of a pin whose package builds now removes it"
+nix eval --impure --json --expr "
+  let f = builtins.fromJSON (builtins.readFile $sys/pins.json); l = builtins.fromJSON (builtins.readFile $sys/flake.lock); b = f.hosts.b; in
+  f // { hosts = f.hosts // { b = b // { pins.toypkgs.hello = {
+    locked = (builtins.fromJSON (builtins.readFile $r3_lock)).nodes.toypkgs.locked; since = \"2026-01-01\"; reason = \"build\";
+    checkedNarHash = l.nodes.toypkgs.locked.narHash; }; }; }; }" >"$work/with-hello.json"
+cp "$work/with-hello.json" "$sys/pins.json"
+"$nixheal" retry hello --host b --config "$config" 2>"$log" || fail "retry hello failed: $(cat "$log")"
+nixheal_ build --no-commit || fail "the retry of hello gave up"
+expect_log "unpinned host b: hello (toypkgs): builds again"
+git -C "$sys" checkout -q -- flake.lock pins.json
+if "$nixheal" retry app --host b --input nope --config "$config" 2>"$log"; then fail "retry --input nope succeeded"; fi
+expect_log "app is not pinned in nope on host b (it is pinned in toypkgs)"
+
+step "why on a held host says so"
+write_config '"app"' "" '"b"'
+"$nixheal" clear app --host b --config "$config" 2>/dev/null || fail "clearing app failed"
 nixheal_ build --no-commit || fail "holding b gave up"
+case "$(held_reason b)" in *"never-pin list"*) ;; *) fail "b should be held for app: $(held_reason b)" ;; esac
 if "$nixheal" why linux --host b --config "$config" 2>"$log"; then fail "why linux on b succeeded"; fi
 expect_log "host b is held since"
 expect_log "release with 'nixheal clear --held --host b'"
 git -C "$sys" checkout -q -- flake.lock pins.json
-if "$nixheal" clear app --host b --input nope --config "$config" 2>"$log"; then fail "clear --input nope succeeded"; fi
-expect_log "app is not pinned in nope on host b (it is pinned in toypkgs)"
+write_config "" "" '"b"'
 
 step "pin --old-lock pins at the revision in another flake.lock"
 "$nixheal" pin hello --host b --input toypkgs --old-lock "$r3_lock" --config "$config" 2>"$log" || fail "pin --old-lock failed: $(cat "$log")"
@@ -851,15 +880,50 @@ EOF
 git -C "$repo2" ls-files --error-unmatch nixos/pins.json >/dev/null || fail "the subdirectory's pins.json is not tracked"
 [ -e "$repo2/nixos/.nixheal.lock" ] && fail "the run lock was left in the work tree"
 
-step "an error on a fresh checkout leaves no pins.json behind, and a dry run untracks one it added"
+step "an error after a run starts on a fresh checkout leaves no pins.json behind, and a dry run untracks one it added"
 git -C "$repo2" rm -q --cached nixos/pins.json
 rm -f "$repo2/nixos/pins.json"
-if "$nixheal" build --config "$sub_config" --old-lock "$work/no-such.lock" 2>"$log"; then fail "a missing --old-lock was accepted"; fi
+if GIT_AUTHOR_NAME= GIT_COMMITTER_NAME= "$nixheal" build --commit --config "$sub_config" 2>"$log"; then fail "a failing commit on a fresh checkout was not an error"; fi
+expect_log "git commit failed"
 [ -e "$repo2/nixos/pins.json" ] && fail "the failed run left pins.json behind"
 git -C "$repo2" ls-files --error-unmatch nixos/pins.json >/dev/null 2>&1 && fail "the failed run left pins.json in the index"
 printf '{"version":2}\n' >"$repo2/nixos/pins.json"
 "$nixheal" build --dry-run --config "$sub_config" 2>"$log" || fail "the dry run with an untracked pins.json failed: $(cat "$log")"
 git -C "$repo2" ls-files --error-unmatch nixos/pins.json >/dev/null 2>&1 && fail "the dry run left pins.json in the index"
 [ -e "$repo2/nixos/pins.json" ] || fail "the dry run removed a pins.json it did not create"
+reject_log "restored flake.lock"
+
+step "a tracked pins.json that was deleted stays an unstaged deletion after a dry run"
+git -C "$repo2" add nixos/pins.json
+git -C "$repo2" commit -qm "pins.json"
+rm "$repo2/nixos/pins.json"
+"$nixheal" build --dry-run --config "$sub_config" 2>"$log" || fail "the dry run without the tracked pins.json failed: $(cat "$log")"
+[ "$(git -C "$repo2" status --porcelain -- nixos/pins.json)" = " D nixos/pins.json" ] || fail "the deletion of pins.json changed: $(git -C "$repo2" status --porcelain -- nixos/pins.json)"
+git -C "$repo2" checkout -q -- nixos/pins.json
+
+step "an unreadable pins.json is an error, and is kept"
+chmod 000 "$repo2/nixos/pins.json"
+if "$nixheal" build --config "$sub_config" 2>"$log"; then fail "an unreadable pins.json was accepted"; fi
+chmod 644 "$repo2/nixos/pins.json"
+expect_log "reading $repo2/nixos/pins.json"
+[ -e "$repo2/nixos/pins.json" ] || fail "the unreadable pins.json was removed"
+
+step "two flakes rooting a host of the same name in one --gc-roots directory are refused"
+"$nixheal" build --config "$sub_config" --gc-roots "$work/roots5" 2>"$log" || fail "rooting the subdirectory flake failed: $(cat "$log")"
+write_config "" "" '"a"'
+if nixheal_ build --no-commit --gc-roots "$work/roots5"; then fail "a second flake rooting host a in the same directory was accepted"; fi
+expect_log "already roots nixheal-host-a for another flake"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
+
+step "a switcher that fails exits with 4 and says the build is kept"
+export STUB_FAIL=1
+rc=0
+nixheal_ switch --no-commit || rc=$?
+unset STUB_FAIL
+[ "$rc" = 4 ] || fail "a failing switcher exited with $rc, not 4"
+expect_log "nh failed"
+expect_log "flake.lock and pins.json are kept"
+git -C "$sys" checkout -q -- flake.lock pins.json
 
 printf '\nall e2e steps passed\n'

@@ -25,6 +25,7 @@ let
       value = import (builtins.fetchTree pin.locked) (
         {
           config = importConfig;
+          overlays = [ ];
         }
         // import ./platform.nix (prev.lib or null) prev.stdenv.buildPlatform prev.stdenv.hostPlatform
       );

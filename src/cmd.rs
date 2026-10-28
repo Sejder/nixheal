@@ -14,6 +14,30 @@ use std::process::{Command, ExitCode};
 
 const PINS: &str = "pins.json";
 
+/// A duration such as "12h", "45min", "30m", "90s", "1d" or "3600".
+fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (n, unit) = text.split_at(split);
+    let n: u64 = n
+        .parse()
+        .map_err(|_| format!("{text:?} is not a duration such as 12h, 45min or 90s"))?;
+    let secs = match unit.trim() {
+        "" | "s" | "sec" => n,
+        "m" | "min" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => {
+            return Err(format!(
+                "{text:?} is not a duration such as 12h, 45min or 90s"
+            ));
+        }
+    };
+    Ok(std::time::Duration::from_secs(secs))
+}
+
 fn default_system() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
@@ -46,7 +70,8 @@ pub struct BuildArgs {
     #[arg(short, long, num_args = 0.., value_name = "INPUT")]
     pub update: Option<Vec<String>>,
     /// Evaluate and build as usual and report what would be pinned and
-    /// unpinned, then restore flake.lock and pins.json.
+    /// unpinned, then restore flake.lock and pins.json; nothing is committed
+    /// or activated.
     #[arg(long)]
     pub dry_run: bool,
     /// Commit flake.lock and pins.json afterwards (default:
@@ -58,7 +83,8 @@ pub struct BuildArgs {
     pub no_commit: bool,
 
     /// Only these hosts or homes from the config; repeatable, or
-    /// comma-separated.
+    /// comma-separated. host:NAME or home:NAME where a host and a home share
+    /// a name.
     #[arg(
         long = "only",
         value_name = "NAME",
@@ -75,8 +101,9 @@ pub struct BuildArgs {
     #[arg(long, value_name = "PATH", help_heading = "Fleet options")]
     pub built_link: Option<PathBuf>,
     /// Keep every system that built alive with a GC root in this directory,
-    /// e.g. for a binary cache to serve them. Roots this flake's runs made
-    /// there for targets no longer configured are removed; nothing else is.
+    /// e.g. for a binary cache to serve them. Without --only, roots this
+    /// flake's runs made there for targets no longer configured are removed;
+    /// nothing else is.
     #[arg(long, value_name = "DIR", help_heading = "Fleet options")]
     pub gc_roots: Option<PathBuf>,
     /// Exit with 3 when a host or home is held, e.g. so a service's
@@ -100,6 +127,10 @@ pub struct BuildArgs {
     /// than this many new packages for it in one run.
     #[arg(long, value_name = "N", default_value_t = 10, help_heading = "Tuning")]
     pub max_new_pins: usize,
+    /// Stop updating, evaluating and building after this long, e.g. 12h,
+    /// 45min or 90s; activation afterwards is not cut short.
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration, help_heading = "Tuning")]
+    pub timeout: Option<std::time::Duration>,
     /// The system for eval checks when a target's own cannot be evaluated.
     #[arg(long, value_name = "SYSTEM", default_value_t = default_system(), help_heading = "Tuning")]
     pub system: String,
@@ -284,11 +315,16 @@ impl Ctx {
 
 /// Create the pins file when missing and make sure a git flake can see it.
 /// Returns whether it created the file, and whether it added it to the index.
-fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<(bool, bool)> {
+fn ensure_pins(path: &Path, git: Option<&Git>, quietly: bool) -> Result<(bool, bool)> {
+    let say = |msg: String| {
+        if !quietly {
+            log::info(&msg);
+        }
+    };
     let created = !path.exists();
     if created {
         PinsFile::default().save(path)?;
-        log::info(&format!("created {}", path.display()));
+        say(format!("created {}", path.display()));
     }
     let mut added = false;
     if let Some(git) = git
@@ -296,7 +332,7 @@ fn ensure_pins(path: &Path, git: Option<&Git>) -> Result<(bool, bool)> {
     {
         git.intent_to_add(path)?;
         added = true;
-        log::info(&format!(
+        say(format!(
             "added {} to the git index so the flake can see it",
             path.display()
         ));
@@ -371,11 +407,13 @@ fn activate(
     let status = cmd
         .status()
         .with_context(|| format!("running {program}; is it installed?"))?;
-    Ok(if status.success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8)
-    })
+    if status.success() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    log::warn(&format!(
+        "{program} failed ({status}); {target} built, and flake.lock and pins.json are kept, so run 'nixheal {verb}' again once that is fixed"
+    ));
+    Ok(ExitCode::from(4))
 }
 
 /// The file in a --gc-roots directory listing the roots this flake's runs
@@ -398,10 +436,32 @@ fn update_roots(
     prune: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let manifest = roots_manifest(dir, flake);
+    // Roots are named by target only, so two flakes rooting a target of the
+    // same name in one directory would overwrite and prune each other's.
+    let prefix = format!(".{ROOT_PREFIX}roots-");
+    for other in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let other = other?.path();
+        let name = other.file_name().map(|n| n.to_string_lossy().into_owned());
+        if other == manifest || !name.is_some_and(|n| n.starts_with(&prefix)) {
+            continue;
+        }
+        let theirs = std::fs::read_to_string(&other).unwrap_or_default();
+        if let Some((target, _)) = built
+            .iter()
+            .find(|(t, _)| theirs.lines().any(|l| l == t.root_name()))
+        {
+            bail!(
+                "{} already roots {} for another flake (see {}); give each flake its own --gc-roots directory",
+                dir.display(),
+                target.root_name(),
+                other.display()
+            );
+        }
+    }
     for (target, drv) in built {
         nix::add_root(drv, &dir.join(target.root_name()))?;
     }
-    let manifest = roots_manifest(dir, flake);
     let ours: Vec<String> = std::fs::read_to_string(&manifest)
         .map(|t| t.lines().map(str::to_string).collect())
         .unwrap_or_default();
@@ -455,9 +515,14 @@ fn check_flake(ctx: &Ctx) -> Result<()> {
     let flake = ctx.flake.as_path();
     if !flake.join("flake.lock").is_file() {
         bail!(
-            "no flake.lock in {} ({}); nixheal needs a locked flake: pass --flake DIR, or run nix flake lock there",
+            "no flake.lock in {} ({}); nixheal needs a locked flake: {}run nix flake lock there",
             flake.display(),
-            ctx.source
+            ctx.source,
+            if ctx.source == "from --flake" {
+                ""
+            } else {
+                "pass --flake DIR, or "
+            }
         );
     }
     let text = flake.to_string_lossy();
@@ -501,7 +566,7 @@ fn tally(changes: &[String]) -> String {
         }
     }
     if parts.is_empty() {
-        "nothing pinned or unpinned".into()
+        "nothing pinned or unpinned in this run".into()
     } else {
         parts.join(", ")
     }
@@ -588,8 +653,12 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         remove_link(link)?;
     }
     let given_old_lock = args.old_lock.as_deref().map(Lock::load).transpose()?;
-    let pins_before = std::fs::read(&pins_path).ok();
-    let (created_pins, indexed) = ensure_pins(&pins_path, git.as_ref())?;
+    let pins_before = match std::fs::read(&pins_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("reading {}", pins_path.display())),
+    };
+    let (created_pins, indexed) = ensure_pins(&pins_path, git.as_ref(), args.dry_run)?;
     guard::arm(guard::Restore {
         lock_path: lock_path.clone(),
         lock: orig_lock.clone(),
@@ -601,6 +670,10 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
 
     // Any error from here on is restored by main, after it is printed.
     let mut last_good = std::collections::HashMap::new();
+    let last_good_pins = targets
+        .iter()
+        .filter_map(|t| state::load_last_good_pins(&ctx.flake, t).map(|e| (t.clone(), e)))
+        .collect();
     let old_lock = match given_old_lock {
         Some(l) => l,
         None => {
@@ -617,6 +690,9 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
     };
 
     let nix = Nix::new(&ctx.flake);
+    if let Some(limit) = args.timeout {
+        guard::deadline(limit);
+    }
     if let Some(inputs) = update {
         nix.flake_update(inputs)?;
     }
@@ -627,6 +703,7 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         new_lock: Lock::load(&lock_path)?,
         old_lock,
         last_good,
+        last_good_pins,
         targets,
         guarded,
         local: local.clone(),
@@ -644,6 +721,7 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
     log::set_dry_run(args.dry_run);
     let report = engine.run();
     log::set_dry_run(false);
+    guard::built();
     let report = report?;
 
     if report.local_failure.is_some() {
@@ -655,7 +733,7 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
     }
 
     if args.dry_run {
-        guard::restore()?;
+        guard::restore_quietly()?;
         log::change(&format!(
             "dry run: {}; nothing was written, committed or activated",
             tally(&report.changes)
@@ -740,6 +818,9 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
     for (target, _) in &report.built {
         state::save_last_good(&ctx.flake, Some(target), &engine.new_lock)?;
     }
+    for (target, entry) in &report.built_pins {
+        state::save_last_good_pins(&ctx.flake, target, entry)?;
+    }
     if !report.built.is_empty() {
         state::save_last_good(&ctx.flake, None, &engine.new_lock)?;
     }
@@ -793,6 +874,12 @@ pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
     let bytes = std::fs::read(other).with_context(|| format!("reading {}", other.display()))?;
     let raw: serde_json::Value =
         serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", other.display()))?;
+    if raw.get("nodes").is_some() {
+        bail!(
+            "{} is a flake.lock, not a pins.json; merge takes another pins.json",
+            other.display()
+        );
+    }
     if raw.get("version").is_none() {
         bail!(
             "{} is not a nixheal pins file (no version)",
@@ -802,7 +889,7 @@ pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
     let incoming =
         PinsFile::parse(&bytes).with_context(|| format!("parsing {}", other.display()))?;
     let pins_path = ctx.pins_path();
-    ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
+    ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref(), false)?;
     let mut file = PinsFile::load(&pins_path)?;
     let mut taken = 0;
     for (kind, name, entry) in incoming.entries() {
@@ -907,11 +994,25 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
             pins += 1;
             let pin = sets[0].1;
             let inputs: Vec<&str> = sets.iter().map(|(i, _)| *i).collect();
+            let queued = sets.iter().any(|(_, p)| p.checked_nar_hash.is_empty())
+                && pin.reason != Reason::Manual;
+            let revs: std::collections::BTreeSet<String> = sets
+                .iter()
+                .map(|(_, p)| engine::describe(&p.locked))
+                .collect();
             rows.push(Row {
                 target: target.clone(),
                 what: format!("{attr} ({})", inputs.join(", ")),
-                reason: reason_words(pin.reason).into(),
-                since: since(&pin.since, pin.reason == Reason::Manual),
+                reason: format!(
+                    "{}{}",
+                    reason_words(pin.reason),
+                    if queued { ", retry queued" } else { "" }
+                ),
+                since: format!(
+                    "{}  at {}",
+                    since(&pin.since, pin.reason == Reason::Manual),
+                    revs.into_iter().collect::<Vec<_>>().join(", ")
+                ),
                 note: None,
             });
         }
@@ -949,9 +1050,10 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
         "{}, {held} held, {stale} stale (older than {warn} days).",
         engine::plural(pins, "pinned package")
     );
-    println!(
-        "'nixheal why ATTR' explains a pin, 'nixheal clear ATTR' retries or removes one, 'nixheal clear --held --host NAME' (or --home) releases a hold."
-    );
+    println!("  nixheal why ATTR       explains a pin");
+    println!("  nixheal retry ATTR     retries one now, keeping it if the package still fails");
+    println!("  nixheal clear ATTR     removes one");
+    println!("  nixheal clear --held   releases a hold (with --host or --home NAME)");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1022,7 +1124,9 @@ pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
             }
         }
     }
-    println!("  undo with: nixheal clear {attr}{}", ctx.flag_for(&target));
+    let flag = ctx.flag_for(&target);
+    println!("  retry with:  nixheal retry {attr}{flag}");
+    println!("  remove with: nixheal clear {attr}{flag}");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1041,12 +1145,15 @@ pub fn pin(
     check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
     let target = ctx.target(pick, None)?;
+    // The default is the target's own input, which may differ from this
+    // machine's.
     let (input, from) = match input {
         Some(i) => (i.to_string(), "--input"),
         None => (
-            ctx.config
-                .as_ref()
-                .and_then(|c| c.input.clone())
+            Nix::new(&ctx.flake)
+                .eval_raw(&format!("{}.input", target.nixheal_config()))
+                .ok()
+                .or_else(|| ctx.config.as_ref().and_then(|c| c.input.clone()))
                 .unwrap_or_else(|| "nixpkgs".to_string()),
             "programs.nixheal.input",
         ),
@@ -1083,13 +1190,13 @@ pub fn pin(
         );
     }
     let pins_path = ctx.pins_path();
-    ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
+    ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref(), false)?;
     let mut file = PinsFile::load(&pins_path)?;
     let at_rev = engine::describe_dated(&locked);
     let entry = file.entry_mut(target.kind, &target.name);
     if let Some(old) = entry.get(input, attr) {
         log::change(&format!(
-            "{target}: {attr} ({input}) was {} since {}; re-pinning it by hand",
+            "{target}: {attr} ({input}) has been {} since {}; re-pinning it by hand",
             if old.reason == Reason::Manual {
                 "pinned by hand".to_string()
             } else {
@@ -1119,13 +1226,83 @@ pub fn pin(
     Ok(ExitCode::SUCCESS)
 }
 
+/// The inputs `attr` is pinned in on `target`, or the one `input` names;
+/// an error naming where it is pinned instead.
+fn pinned_inputs(
+    ctx: &Ctx,
+    file: &PinsFile,
+    target: &Target,
+    attr: &str,
+    input: Option<&str>,
+) -> Result<Vec<String>> {
+    let pinned = file
+        .entry(target.kind, &target.name)
+        .map(|e| e.inputs_pinning(attr))
+        .unwrap_or_default();
+    if pinned.is_empty() {
+        bail!(
+            "{attr} is not pinned on {target}{}",
+            ctx.pinned_elsewhere(file, target, attr)
+        );
+    }
+    match input {
+        Some(i) if !pinned.iter().any(|p| p == i) => bail!(
+            "{attr} is not pinned in {i} on {target} (it is pinned in {})",
+            pinned.join(", ")
+        ),
+        Some(i) => Ok(vec![i.to_string()]),
+        None => Ok(pinned),
+    }
+}
+
+pub fn retry(at: &Where, pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
+    let ctx = Ctx::open(at, false)?;
+    ctx.announce();
+    check_flake(&ctx)?;
+    let _run_lock = guard::lock_flake(&ctx.flake)?;
+    let pins_path = ctx.pins_path();
+    let mut file = PinsFile::load(&pins_path)?;
+    let target = ctx.target(pick, Some(&file))?;
+    let inputs = pinned_inputs(&ctx, &file, &target, attr, input)?;
+    let entry = file.entry_mut(target.kind, &target.name);
+    let manual: Vec<&String> = inputs
+        .iter()
+        .filter(|i| {
+            entry
+                .get(i, attr)
+                .is_some_and(|p| p.reason == Reason::Manual)
+        })
+        .collect();
+    if !manual.is_empty() {
+        bail!(
+            "{attr} ({}) on {target} is pinned by hand and never retried; remove it with 'nixheal clear {attr}{}'",
+            manual
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            ctx.flag_for(&target)
+        );
+    }
+    for i in &inputs {
+        if let Some(pin) = entry.pins.get_mut(i).and_then(|s| s.get_mut(attr)) {
+            pin.checked_nar_hash.clear();
+        }
+    }
+    file.save(&pins_path)?;
+    log::change(&format!(
+        "{target}: the next build, switch or boot retries {attr} ({}): the pin goes if it builds, and stays at its revision if it still fails",
+        inputs.join(", ")
+    ));
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn clear(
     at: &Where,
     pick: &Pick,
     attr: Option<&str>,
     input: Option<&str>,
     held: bool,
-    drop: bool,
 ) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
     ctx.announce();
@@ -1134,68 +1311,78 @@ pub fn clear(
     let pins_path = ctx.pins_path();
     let mut file = PinsFile::load(&pins_path)?;
     let target = ctx.target(pick, Some(&file))?;
-    let elsewhere = attr.map(|a| ctx.pinned_elsewhere(&file, &target, a));
-    let entry = file.entry_mut(target.kind, &target.name);
     if held {
-        if entry.held.take().is_none() {
+        if file
+            .entry_mut(target.kind, &target.name)
+            .held
+            .take()
+            .is_none()
+        {
             bail!("{target} is not held");
         }
+        file.save(&pins_path)?;
         log::change(&format!(
             "released {target}; the next build, switch or boot builds it with the current lock"
         ));
-    } else {
-        let Some(attr) = attr else {
-            bail!("name an attr to clear, or pass --held");
-        };
-        let pinned = entry.inputs_pinning(attr);
-        if pinned.is_empty() {
-            bail!(
-                "{attr} is not pinned on {target}{}",
-                elsewhere.unwrap_or_default()
-            );
-        }
-        let inputs = match input {
-            Some(i) if !pinned.iter().any(|p| p == i) => bail!(
-                "{attr} is not pinned in {i} on {target} (it is pinned in {})",
-                pinned.join(", ")
-            ),
-            Some(i) => vec![i.to_string()],
-            None => pinned,
-        };
-        let (manual, made): (Vec<String>, Vec<String>) = inputs.into_iter().partition(|i| {
-            entry
-                .get(i, attr)
-                .is_some_and(|p| p.reason == Reason::Manual)
-        });
-        if !manual.is_empty() {
-            for i in &manual {
-                entry.remove(i, attr);
-            }
-            log::change(&format!(
-                "unpinned {target}: {attr} ({}), which was pinned by hand",
-                manual.join(", ")
-            ));
-        }
-        if !made.is_empty() && drop {
-            for i in &made {
-                entry.remove(i, attr);
-            }
-            log::change(&format!(
-                "unpinned {target}: {attr} ({}). If it still fails, a run can only pin it again once its package set moves; until then the host is held, or this machine's own run gives up. Undo with 'git checkout -- pins.json'",
-                made.join(", ")
-            ));
-        } else if !made.is_empty() {
-            for i in &made {
-                if let Some(pin) = entry.pins.get_mut(i).and_then(|s| s.get_mut(attr)) {
-                    pin.checked_nar_hash.clear();
-                }
-            }
-            log::change(&format!(
-                "{target}: the next build, switch or boot retries {attr} ({}): the pin goes if it builds, and stays at its revision if it still fails. Pass --drop to remove it outright",
-                made.join(", ")
-            ));
-        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let Some(attr) = attr else {
+        bail!("name an attr to clear, or pass --held");
+    };
+    let inputs = pinned_inputs(&ctx, &file, &target, attr, input)?;
+    let entry = file.entry_mut(target.kind, &target.name);
+    let manual = inputs.iter().all(|i| {
+        entry
+            .get(i, attr)
+            .is_some_and(|p| p.reason == Reason::Manual)
+    });
+    for i in &inputs {
+        entry.remove(i, attr);
     }
     file.save(&pins_path)?;
+    log::change(&format!(
+        "unpinned {target}: {attr} ({}); the next build, switch or boot builds it from the current lock{}",
+        inputs.join(", "),
+        if manual {
+            ""
+        } else {
+            ", and pins it again at the revision it last built with if it still fails"
+        }
+    ));
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(
+            parse_duration("12h"),
+            Ok(std::time::Duration::from_secs(43_200))
+        );
+        assert_eq!(
+            parse_duration("45min"),
+            Ok(std::time::Duration::from_secs(2_700))
+        );
+        assert_eq!(
+            parse_duration("30m"),
+            Ok(std::time::Duration::from_secs(1_800))
+        );
+        assert_eq!(
+            parse_duration("90s"),
+            Ok(std::time::Duration::from_secs(90))
+        );
+        assert_eq!(
+            parse_duration("1d"),
+            Ok(std::time::Duration::from_secs(86_400))
+        );
+        assert_eq!(
+            parse_duration("3600"),
+            Ok(std::time::Duration::from_secs(3_600))
+        );
+        assert!(parse_duration("soon").is_err());
+        assert!(parse_duration("1h30min").is_err());
+    }
 }

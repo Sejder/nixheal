@@ -325,6 +325,19 @@
             assert
               (onReal pkgs.pkgsCross.riscv64).hello.drvPath == pkgs.pkgsCross.riscv64.hello.drvPath;
             assert (onReal pkgs.pkgsMusl).hello.drvPath == pkgs.pkgsMusl.hello.drvPath;
+            assert
+              import ./nix/platform.nix null
+                {
+                  system = "x86_64-linux";
+                  config = "x86_64-unknown-linux-gnu";
+                }
+                {
+                  system = "aarch64-linux";
+                  config = "aarch64-unknown-linux-gnu";
+                } == {
+                localSystem.system = "x86_64-linux";
+                crossSystem.config = "aarch64-unknown-linux-gnu";
+              };
             assert (onReal pkgs.pkgsLLVM).hello.drvPath == pkgs.pkgsLLVM.hello.drvPath;
             assert (onReal tuned).hello.drvPath == tuned.hello.drvPath;
             pkgs.runCommand "nixheal-overlay-check" { } "touch $out";
@@ -339,7 +352,7 @@
             assert settings.switcher == "nh";
             assert settings.commit == false;
             assert upgrade.serviceConfig.User == "alice";
-            assert builtins.match ".*nixheal build --built-link /run/nixheal/system --no-commit --update nixpkgs" upgrade.serviceConfig.ExecStart != null;
+            assert builtins.match ".*nixheal build --built-link /run/nixheal/system --no-commit --timeout 12h --update nixpkgs" upgrade.serviceConfig.ExecStart != null;
             assert builtins.match "[+]/nix/store/.*-nixheal-activate" upgrade.serviceConfig.ExecStartPost != null;
             assert machine.config.systemd.timers.nixheal-upgrade.timerConfig.OnCalendar == "04:40";
             assert !(settings ? inputs);
@@ -348,7 +361,7 @@
             assert upgrade.environment.NIXHEAL_CONFIG == "/etc/nixheal.json";
             assert upgrade.unitConfig.OnFailure == [ ];
             assert upgrade.unitConfig.X-StopOnRemoval == false;
-            assert upgrade.serviceConfig.TimeoutStartSec == "12h";
+            assert !(upgrade.serviceConfig ? TimeoutStartSec);
             assert builtins.any (nixpkgs.lib.hasInfix "read-only nixpkgs") readOnly.config.warnings;
             assert readOnly.config.system.build.toplevel.drvPath != "";
             assert upgrade.restartIfChanged == false;
@@ -385,7 +398,7 @@
             assert homeSettings.homes == [ "alice" ];
             assert builtins.length home.config.nixpkgs.overlays == 1;
             assert home.config.programs.nixheal.packageSets ? nixpkgs;
-            assert builtins.match ".*nixheal switch --no-commit --update" homeUpgrade.Service.ExecStart != null;
+            assert builtins.match ".*nixheal switch --no-commit --timeout 12h --update" homeUpgrade.Service.ExecStart != null;
             assert !(homeUpgrade.Unit ? After);
             assert homeUpgrade.Unit.X-SwitchMethod == "keep-old";
             assert home.config.systemd.user.timers.nixheal-upgrade.Timer.OnCalendar == "04:40";

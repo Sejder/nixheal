@@ -1,5 +1,6 @@
 use crate::config::Target;
 use crate::lock::Lock;
+use crate::pins::Entry;
 use crate::pins::write_atomic;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,28 @@ pub fn lock_path(flake: &Path) -> Result<PathBuf> {
     let dir = state_dir().context("neither XDG_STATE_HOME nor HOME is set")?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir.join(format!("run-{}.lock", key(&flake.to_string_lossy()))))
+}
+
+/// The pins a target built with on its last good lock: a lock only counts as
+/// good together with them, so a package pinned then is pinned to the same
+/// revision when it fails again.
+fn last_good_pins_path(flake: &Path, target: &Target) -> Option<PathBuf> {
+    let lock = last_good_path(flake, Some(target))?;
+    Some(lock.with_extension("pins.json"))
+}
+
+pub fn load_last_good_pins(flake: &Path, target: &Target) -> Option<Entry> {
+    let bytes = std::fs::read(last_good_pins_path(flake, target)?).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn save_last_good_pins(flake: &Path, target: &Target, entry: &Entry) -> Result<()> {
+    let Some(path) = last_good_pins_path(flake, target) else {
+        return Ok(());
+    };
+    let mut bytes = serde_json::to_vec_pretty(entry)?;
+    bytes.push(b'\n');
+    write_atomic(&path, &bytes)
 }
 
 pub fn load_last_good(flake: &Path, target: Option<&Target>) -> Option<Lock> {

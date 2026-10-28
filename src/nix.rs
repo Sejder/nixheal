@@ -113,6 +113,10 @@ impl Monitor {
 
         let status = child.wait().context("waiting for nix");
         crate::guard::untrack(child.id());
+        crate::guard::halt_if_interrupted();
+        if crate::guard::timed_out() {
+            bail!("stopped: the run took longer than --timeout");
+        }
         let status = status?;
         let out = collect.join().expect("stdout reader")?;
         Ok((status, out, errors))
@@ -159,6 +163,10 @@ impl Nix {
         }
         let status = child.wait().context("waiting for nix flake update");
         crate::guard::untrack(child.id());
+        crate::guard::halt_if_interrupted();
+        if crate::guard::timed_out() {
+            bail!("stopped: the run took longer than --timeout");
+        }
         if !status?.success() {
             if quiet {
                 eprint!("{}", String::from_utf8_lossy(&stderr));
