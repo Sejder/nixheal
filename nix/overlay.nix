@@ -11,13 +11,10 @@ let
   entry = (data.${kind} or { }).${name} or { };
   set = (entry.pins or { }).${input} or { };
 
-  importConfig =
-    if nixpkgsConfig != null then
-      nixpkgsConfig
-    else
-      builtins.removeAttrs prev.config (
-        builtins.filter (n: prev.config.${n} == null) (builtins.attrNames prev.config)
-      );
+  given = if nixpkgsConfig != null then nixpkgsConfig else prev.config;
+  importConfig = builtins.removeAttrs given (
+    builtins.filter (n: given.${n} == null) (builtins.attrNames given)
+  );
 
   sources = builtins.listToAttrs (
     map (pin: {

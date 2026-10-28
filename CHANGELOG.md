@@ -4,6 +4,11 @@
 
 Fixes from a sixth review and a fourth review of the command line:
 
+- Standalone Home Manager no longer fails to evaluate once something is
+  pinned: `homeManagerConfiguration` passes its full `nixpkgs.config`, with
+  options left at `null`, which an older nixpkgs rejects. Null settings are
+  now dropped for every pinned import and extra package set.
+
 - A lock only counts as last good together with the pins it built with, which
   are now kept next to it. A package that fails again is pinned to the
   revision that worked, also after its pin was cleared or a run's uncommitted

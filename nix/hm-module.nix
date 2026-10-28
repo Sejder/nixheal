@@ -29,7 +29,7 @@ let
     import set.source (
       platformArgs
       // {
-        inherit (set) config;
+        config = lib.filterAttrs (_: v: v != null) set.config;
         overlays = lib.optional cfg.enable (overlay input set.config);
       }
     )

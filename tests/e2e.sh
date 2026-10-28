@@ -120,6 +120,8 @@ mkdir -p "$toy" "$sys"
 git -C "$toy" init -q -b main
 cat >"$toy/default.nix" <<'EOF'
 { localSystem ? { inherit system; }, system ? localSystem.system, crossSystem ? null, config ? { }, overlays ? [ ] }:
+assert builtins.all (n: config.${n} != null) (builtins.attrNames config)
+  || throw "A definition for option `${builtins.head (builtins.filter (n: config.${n} == null) (builtins.attrNames config))}' is not of the right type: null";
 let
   state = import ./state.nix;
   mk = name: pname: deps: script: derivation {
@@ -222,7 +224,10 @@ cat >"$sys/flake.nix" <<EOF
         let
           pkgs = import toypkgs {
             inherit system;
-            overlays = [ (import ./overlay.nix { pins = ./pins.json; inherit kind name; input = "toypkgs"; }) ];
+            overlays = [ (import ./overlay.nix {
+              pins = ./pins.json; inherit kind name; input = "toypkgs";
+              nixpkgsConfig = if name == "elaborated" then { rewriteURL = null; allowUnfree = false; } else null;
+            }) ];
           };
           sp = derivation {
             name = "system-path-\${name}";
@@ -257,6 +262,7 @@ cat >"$sys/flake.nix" <<EOF
       nixosConfigurations.e = mkTwo "e" (p: p2: [ p2.app ]);
       nixosConfigurations.d = mkEmbedding "d" (p: [ p.hello ]);
       homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]) { };
+      homeConfigurations.elaborated = mkHostOf "homes" "elaborated" (p: [ p.hello ]) { };
       nixosConfigurations.misnamed = mkHostOf "hosts" "misnamed" (p: [ p.hello ]) { name = "other"; };
       nixosConfigurations.elsewhere = mkHostOf "hosts" "elsewhere" (p: [ p.hello ]) { pinsFile = ./sub/pins.json; };
     };
@@ -924,6 +930,19 @@ unset STUB_FAIL
 [ "$rc" = 4 ] || fail "a failing switcher exited with $rc, not 4"
 expect_log "nh failed"
 expect_log "flake.lock and pins.json are kept"
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "a Home Manager config with null settings (as homeManagerConfiguration passes it) takes a pin"
+cat >"$config" <<EOF
+{ "kind": "home", "self": "elaborated", "flake": "$sys", "hosts": [], "homes": ["elaborated"],
+  "warnAfterDays": 14, "deny": [] }
+EOF
+revision fixed false 60 ok
+nixheal_ build --update --no-commit || fail "the elaborated home did not build"
+revision fixed false broken ok
+nixheal_ build --update --no-commit || fail "pinning hello for a home whose config has null settings gave up"
+expect_log "pinned home elaborated: hello (toypkgs)"
+expect_log "home elaborated builds"
 git -C "$sys" checkout -q -- flake.lock pins.json
 
 printf '\nall e2e steps passed\n'
