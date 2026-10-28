@@ -195,7 +195,10 @@ in
           GIT_COMMITTER_NAME = "nixheal";
           GIT_COMMITTER_EMAIL = "nixheal@${config.networking.hostName}";
         };
-        unitConfig.OnFailure = up.onFailure;
+        unitConfig = {
+          OnFailure = up.onFailure;
+          X-StopOnRemoval = false;
+        };
         serviceConfig = {
           Type = "oneshot";
           User = up.user;

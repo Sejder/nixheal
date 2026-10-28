@@ -196,6 +196,14 @@ impl Graph {
         Vec::new()
     }
 
+    /// Whether `drv` builds a package (it has a pname and is not a download),
+    /// as opposed to configuration glue such as a unit file or system-path.
+    pub fn is_package(&self, drv: &str) -> bool {
+        self.nodes
+            .get(drv)
+            .is_some_and(|n| n.pname.is_some() && !n.fixed_output)
+    }
+
     pub fn display_name(&self, drv: &str) -> String {
         match self.nodes.get(drv) {
             Some(n) if !n.name.is_empty() => n.name.clone(),

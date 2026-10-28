@@ -1,6 +1,9 @@
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUIET: AtomicBool = AtomicBool::new(false);
+static DRY_RUN: AtomicBool = AtomicBool::new(false);
+static HELD_BACK: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn set_quiet(quiet: bool) {
     if quiet {
@@ -10,6 +13,11 @@ pub fn set_quiet(quiet: bool) {
 
 pub fn is_quiet() -> bool {
     QUIET.load(Ordering::Relaxed)
+}
+
+/// Mark changes as only what a dry run would do.
+pub fn set_dry_run(dry: bool) {
+    DRY_RUN.store(dry, Ordering::Relaxed);
 }
 
 /// Whether stderr is the journal: systemd sets JOURNAL_STREAM to the
@@ -41,7 +49,11 @@ pub fn info(msg: &str) {
 
 /// A pin, unpin, hold or release, or why nixheal gave up; always shown.
 pub fn change(msg: &str) {
-    eprintln!("nixheal: {msg}");
+    if DRY_RUN.load(Ordering::Relaxed) {
+        eprintln!("nixheal: (dry run) {msg}");
+    } else {
+        eprintln!("nixheal: {msg}");
+    }
 }
 
 /// A build or download nix starts, forwarded off a terminal so the journal
@@ -52,9 +64,33 @@ pub fn nix_progress(msg: &str) {
     }
 }
 
-/// An error message forwarded from nix; shown with --quiet too.
+/// An error message forwarded from nix. With --quiet it is held back, and
+/// only shown when nixheal could not handle it (see flush_nix_errors).
 pub fn nix_error(msg: &str) {
-    eprintln!("{msg}");
+    if is_quiet() {
+        if let Ok(mut held) = HELD_BACK.lock() {
+            held.push(msg.to_string());
+        }
+    } else {
+        eprintln!("{msg}");
+    }
+}
+
+/// Print the nix errors held back under --quiet: a run is about to report a
+/// hold, give up, or fail, and they say why.
+pub fn flush_nix_errors() {
+    if let Ok(mut held) = HELD_BACK.lock() {
+        for msg in held.drain(..) {
+            eprintln!("{msg}");
+        }
+    }
+}
+
+/// Drop the nix errors held back under --quiet: nixheal handled them.
+pub fn discard_nix_errors() {
+    if let Ok(mut held) = HELD_BACK.lock() {
+        held.clear();
+    }
 }
 
 /// Logged at warning priority when stderr goes to the journal.

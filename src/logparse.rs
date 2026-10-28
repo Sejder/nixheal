@@ -21,8 +21,15 @@ pub enum Failure {
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
 static CANNOT_BUILD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Cannot build '(/[^']+\.drv)'\.\s*Reason: ([^\n]*)").unwrap());
-static BUILDER_FAILED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"builder for '(/[^']+\.drv)' failed").unwrap());
+static BUILDER_FAILED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"builder for '(/[^']+\.drv)' failed( due to signal [^\n;]*)?").unwrap()
+});
+static OLD_TIMEOUT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:building of|builder for) '(/[^']+\.drv)' timed out[^\n]*").unwrap()
+});
+static OLD_DEPENDENTS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"dependenc(?:y|ies) of derivation '(/[^']+\.drv)' failed to build").unwrap()
+});
 static HASH_MISMATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"hash mismatch in fixed-output derivation '(/[^']+\.drv)'").unwrap()
 });
@@ -79,13 +86,17 @@ pub fn headline(msg: &str) -> String {
     {
         return item.trim_start_matches("- ").to_string();
     }
-    let last = lines
+    let line = lines
         .iter()
         .rev()
-        .find(|l| informative(l))
+        .find(|l| l.starts_with("error: ") && l.len() > "error: ".len())
+        .or_else(|| lines.iter().rev().find(|l| informative(l)))
         .copied()
         .unwrap_or("");
-    last.strip_prefix("error: ").unwrap_or(last).to_string()
+    let line = line.strip_prefix("error: ").unwrap_or(line);
+    line.trim_end_matches("Definition values:")
+        .trim_end()
+        .to_string()
 }
 
 /// Packages an evaluation error passed through on its way down, innermost
@@ -195,9 +206,25 @@ pub fn parse(messages: &[String]) -> Vec<Failure> {
         }
         for c in BUILDER_FAILED.captures_iter(&msg) {
             found_build = true;
-            push(Failure::Build {
+            match c.get(2) {
+                Some(signal) => push(Failure::Infra {
+                    drv: c[1].to_string(),
+                    reason: format!("builder failed{}", signal.as_str().trim_end_matches('.')),
+                }),
+                None => push(Failure::Build {
+                    drv: c[1].to_string(),
+                }),
+            }
+        }
+        for c in OLD_TIMEOUT.captures_iter(&msg) {
+            found_build = true;
+            push(Failure::Infra {
                 drv: c[1].to_string(),
+                reason: "timed out".into(),
             });
+        }
+        if OLD_DEPENDENTS.is_match(&msg) {
+            found_build = true;
         }
         if found_build {
             continue;
@@ -240,7 +267,13 @@ pub fn failed_drvs(messages: &[String]) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for msg in messages {
         let msg = strip_ansi(msg);
-        for re in [&*CANNOT_BUILD, &*BUILDER_FAILED, &*HASH_MISMATCH] {
+        for re in [
+            &*CANNOT_BUILD,
+            &*BUILDER_FAILED,
+            &*HASH_MISMATCH,
+            &*OLD_TIMEOUT,
+            &*OLD_DEPENDENTS,
+        ] {
             for c in re.captures_iter(&msg) {
                 out.insert(c[1].to_string());
             }
@@ -328,6 +361,33 @@ mod tests {
                 drv: "/nix/store/abc-foo-1.0.drv".into()
             }]
         );
+        let all = failed_drvs(&msgs);
+        assert!(all.contains("/nix/store/abc-foo-1.0.drv"));
+        assert!(all.contains("/nix/store/def-bar-1.0.drv"));
+    }
+
+    #[test]
+    fn old_signal_and_timeout_formats_are_infrastructure() {
+        let msgs = vec![
+            "error: builder for '/nix/store/abc-big-1.0.drv' failed due to signal 9 (Killed)"
+                .to_string(),
+            "error: building of '/nix/store/abc-slow-1.0.drv' timed out after 3600 seconds of silence"
+                .to_string(),
+        ];
+        assert_eq!(
+            parse(&msgs),
+            vec![
+                Failure::Infra {
+                    drv: "/nix/store/abc-big-1.0.drv".into(),
+                    reason: "builder failed due to signal 9 (Killed)".into()
+                },
+                Failure::Infra {
+                    drv: "/nix/store/abc-slow-1.0.drv".into(),
+                    reason: "timed out".into()
+                },
+            ]
+        );
+        assert_eq!(failed_drvs(&msgs).len(), 2);
     }
 
     #[test]
@@ -433,6 +493,11 @@ mod tests {
         let plain = "error:\n       \u{2026} while evaluating the attribute 'x'\n\n       (stack trace truncated; use '--show-trace' to show the full, detailed trace)\n\n       error: undefined variable 'foo'\n";
         assert_eq!(headline(plain), "undefined variable 'foo'");
         assert_eq!(headline("error: something broke"), "something broke");
+        let option = "error:\n       \u{2026} while evaluating the attribute 'config'\n\n       error: The option `services.gone' does not exist. Definition values:\n       - In `/nix/store/x-source/hosts/b.nix': true\n";
+        assert_eq!(
+            headline(option),
+            "The option `services.gone' does not exist."
+        );
     }
 
     #[test]

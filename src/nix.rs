@@ -210,6 +210,19 @@ impl Nix {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    /// The full error of evaluating `attr`, with every frame of its trace:
+    /// what nix shows by default is cut short before the packages an error
+    /// passed through. Not shown to the user.
+    pub fn eval_trace(&self, attr: &str) -> Result<String> {
+        let out = command()
+            .args(["eval", "--raw", "--show-trace"])
+            .arg(self.installable(attr))
+            .stdin(Stdio::null())
+            .output()
+            .context("spawning nix eval")?;
+        Ok(logparse::strip_ansi(&String::from_utf8_lossy(&out.stderr)))
+    }
+
     pub fn eval_raw(&self, attr: &str) -> Result<String> {
         let out = command()
             .args(["eval", "--raw"])
@@ -232,6 +245,19 @@ pub fn add_root(drv: &str, link: &Path) -> Result<()> {
         .output()
         .context("spawning nix build")?;
     checked(&format!("rooting {drv}"), out).map(|_| ())
+}
+
+/// Whether every output of `drv` is in the store, i.e. it really built.
+pub fn is_built(drv: &str) -> Result<bool> {
+    let out = command()
+        .args(["path-info", "--offline"])
+        .arg(format!("{drv}^*"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("spawning nix path-info")?;
+    Ok(out.success())
 }
 
 /// The `out` path of a built derivation, read from the drv itself.

@@ -1,5 +1,5 @@
 use crate::pins::Kind;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,8 @@ fn default_warn_after_days() -> i64 {
     14
 }
 
+pub const ROOT_PREFIX: &str = "nixheal-";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     pub kind: Kind,
@@ -74,11 +76,12 @@ impl Target {
         format!("{}.pkgs.stdenv.hostPlatform.system", self.base())
     }
 
-    /// The name of this target's GC root under --gc-roots.
+    /// The name of this target's GC root under --gc-roots. The prefix marks
+    /// the roots nixheal made, the only ones it ever removes there.
     pub fn root_name(&self) -> String {
         match self.kind {
-            Kind::Nixos => self.name.clone(),
-            Kind::Home => format!("home-{}", self.name),
+            Kind::Nixos => format!("{ROOT_PREFIX}host-{}", self.name),
+            Kind::Home => format!("{ROOT_PREFIX}home-{}", self.name),
         }
     }
 
@@ -122,27 +125,47 @@ fn user_config() -> Option<PathBuf> {
     Some(base.join("nixheal.json"))
 }
 
-/// The config in effect: an explicit path, then $NIXHEAL_CONFIG, then the
-/// Home Manager file, then the NixOS one.
-pub fn locate(explicit: Option<&Path>) -> Option<PathBuf> {
+/// Where the config in effect is, and whether it was asked for: an explicit
+/// path, then $NIXHEAL_CONFIG, then the Home Manager file, then the NixOS one.
+pub struct Located {
+    pub path: PathBuf,
+    /// Named by --config or $NIXHEAL_CONFIG, so it must work.
+    pub explicit: bool,
+}
+
+pub fn locate(explicit: Option<&Path>) -> Option<Located> {
     if let Some(p) = explicit {
-        return Some(p.to_path_buf());
+        return Some(Located {
+            path: p.to_path_buf(),
+            explicit: true,
+        });
     }
     if let Some(p) = std::env::var_os("NIXHEAL_CONFIG") {
-        return Some(PathBuf::from(p));
+        return Some(Located {
+            path: PathBuf::from(p),
+            explicit: true,
+        });
     }
     [user_config(), Some(PathBuf::from("/etc/nixheal.json"))]
         .into_iter()
         .flatten()
         .find(|p| p.exists())
+        .map(|path| Located {
+            path,
+            explicit: false,
+        })
 }
 
-pub fn load(explicit: Option<&Path>) -> Result<Config> {
-    let Some(path) = locate(explicit) else {
-        bail!("no nixheal config: enable programs.nixheal, or pass --config");
-    };
-    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+pub fn read(path: &Path) -> Result<Config> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     Config::parse(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// What `nixheal` with no config at all says.
+pub fn missing() -> anyhow::Error {
+    anyhow::anyhow!(
+        "no nixheal config: enable programs.nixheal (it writes /etc/nixheal.json or ~/.config/nixheal.json), or pass --config"
+    )
 }
 
 #[cfg(test)]
@@ -181,6 +204,11 @@ mod tests {
             "nixosConfigurations.\"laptop\".config.programs.nixheal.packageSets"
         );
         assert_eq!(h.to_string(), "host laptop");
+        assert_eq!(h.root_name(), "nixheal-host-laptop");
+        assert_eq!(
+            Target::new(Kind::Home, "laptop").root_name(),
+            "nixheal-home-laptop"
+        );
         let m = Target::new(Kind::Home, "alice@wsl");
         assert_eq!(
             m.output(),

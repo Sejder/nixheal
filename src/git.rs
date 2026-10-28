@@ -74,8 +74,8 @@ impl Git {
         Ok(())
     }
 
-    fn rev_parse(&self, arg: &str) -> Option<String> {
-        let out = self.command().args(["rev-parse", arg]).output().ok()?;
+    fn rev_parse(&self, args: &[&str]) -> Option<String> {
+        let out = self.command().arg("rev-parse").args(args).output().ok()?;
         out.status.success().then(|| {
             String::from_utf8_lossy(&out.stdout)
                 .trim_end_matches('\n')
@@ -85,13 +85,18 @@ impl Git {
 
     /// The repository's git directory, also for worktrees, where .git is a file.
     pub fn git_dir(&self) -> Option<PathBuf> {
-        self.rev_parse("--absolute-git-dir").map(PathBuf::from)
+        self.rev_parse(&["--absolute-git-dir"]).map(PathBuf::from)
     }
 
     /// Where the flake sits below the repository's top, e.g. "nixos/" for a
     /// flake in a subdirectory; empty at the top.
     pub fn prefix(&self) -> String {
-        self.rev_parse("--show-prefix").unwrap_or_default()
+        self.rev_parse(&["--show-prefix"]).unwrap_or_default()
+    }
+
+    /// The abbreviated hash of HEAD, for reporting a commit.
+    pub fn head(&self) -> Option<String> {
+        self.rev_parse(&["--short", "HEAD"])
     }
 
     /// Undo --intent-to-add for a file this run created.

@@ -82,6 +82,14 @@ impl Lock {
         locked.is_object().then(|| locked.clone())
     }
 
+    /// The flake's own inputs, as named in flake.nix.
+    pub fn inputs(&self) -> Vec<String> {
+        self.json["nodes"][self.root()]["inputs"]
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn nar_hash(&self, input: &str) -> Option<String> {
         self.locked(input)?["narHash"].as_str().map(str::to_string)
     }
@@ -119,6 +127,16 @@ mod tests {
     #[test]
     fn follows_paths() {
         assert_eq!(lock().nar_hash("followed").as_deref(), Some("sha256-A"));
+    }
+
+    #[test]
+    fn root_inputs() {
+        let mut inputs = lock().inputs();
+        inputs.sort();
+        assert_eq!(
+            inputs,
+            ["followed", "home-manager", "nixpkgs", "nixpkgs-unstable"]
+        );
     }
 
     #[test]

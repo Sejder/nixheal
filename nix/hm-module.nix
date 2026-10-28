@@ -139,6 +139,7 @@ in
         Unit = {
           Description = "Update the flake with nixheal and switch Home Manager";
           OnFailure = cfg.autoUpgrade.onFailure;
+          X-SwitchMethod = "keep-old";
         };
         Service = {
           Type = "oneshot";

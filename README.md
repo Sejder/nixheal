@@ -17,12 +17,15 @@ and undoes it by itself:
 
 ```
 $ nixheal switch --update
+nixheal: flake /home/alice/nixos (config /etc/nixheal.json)
 nixheal: round 1: evaluating and building host laptop with 0 pin(s)
 nixheal: pinned host laptop: nixpkgs.sbctl at 718f670e8453: /nix/store/...-sbctl-0.18.drv
+nixheal: the errors above were handled: pinned 1 package(s), building again
 nixheal: round 2: evaluating and building host laptop with 1 pin(s)
+nixheal: host laptop: nixpkgs.sbctl pinned today
 nixheal: host laptop builds
-nixheal: committed "nixheal: update flake.lock"
-> Building NixOS configuration
+nixheal: done: 1 built, 1 pinned; committed 3f2a9c1 "nixheal: update flake.lock"
+nixheal: switch host laptop with nh
 ...
 $ nixheal switch --update          # a few days later, sbctl is fixed upstream
 nixheal: retrying host laptop: nixpkgs.sbctl: nixpkgs moved since it was pinned
@@ -138,17 +141,22 @@ a configuration that no longer evaluates, such as a removed NixOS option, a
 denylisted core package such as the kernel, glibc, systemd, nix, stdenv or
 gcc, a package too much depends on, a package that fails at the old revision
 too, or a package nixpkgs refuses to evaluate because it became insecure,
-unfree or unsupported), the host is held: it keeps the system it runs.
-Packages marked broken are pinned like failed builds. A held entry records the
-lock it is held on. The machine
+unfree or unsupported), the host is held: nixheal records the lock it last
+built with in its entry and does not build it on the new one. The shared
+`flake.lock` still moves for the other hosts, so a held machine only stays on
+its old system if whatever updates it checks `held` (see [A fleet](#a-fleet));
+a run on the machine itself never activates a held host. A held host is
+retried on every run and released once it builds. Packages marked broken are
+pinned like failed builds. The machine
 nixheal runs on is never held unless you pass `--hold-local`: nixheal gives up
 on it instead, for `build`, `switch`, `boot` and the timer alike. It restores
 `flake.lock` and `pins.json`, commits nothing and activates nothing.
 
 **Infrastructure.** A build that cannot run on this machine at all (another
 platform, no builder, a timeout, out of memory, a build killed by a signal) is
-not a broken package. nixheal stops the run without pinning or holding
-anything and restores the files. A build killed by a signal, or a failed
+not a broken package, and neither is a build that fails without nix naming a
+derivation (the daemon went away, the disk is full). nixheal stops the run
+without pinning or holding anything and restores the files. A build killed by a signal, or a failed
 download that is not a hash mismatch, is retried once first.
 
 **Last good lock.** The lock a target last built with, kept per flake and
@@ -173,28 +181,37 @@ The verbs follow `nh` and `nixos-rebuild`:
 | `nixheal status [--json]` | pins and held hosts with their age |
 | `nixheal why <attr>` | the failed derivation, the path up to the pinned package, the end of the build log |
 | `nixheal pin <attr> [--input I]` | pin by hand at the current lock (in `programs.nixheal.input` by default); kept until cleared |
-| `nixheal clear <attr> [--input I]` / `--held` | remove a pin, or release a held host |
-| `nixheal merge <file>` | fold another `pins.json` in; per host, the entry from the newer lock wins |
+| `nixheal clear <attr> [--input I]` | remove a pin; the next run builds the package from the current lock and pins it again if it still fails |
+| `nixheal clear --held` | release a held host or home: drop its held lock, so machines that skip held entries update again and the next run starts from the last good lock |
+| `nixheal merge <file>` | fold another `pins.json` in; per host or home, the entry from the newer lock wins |
 
 `why`, `pin` and `clear` act on this machine's entry, or on `--host NAME` /
-`--home NAME`. Every command takes `--config FILE` and `--flake DIR`.
+`--home NAME`. `pin`, `clear` and `merge` only change `pins.json`; the next
+`build`, `switch` or `boot` applies and commits it.
+
+`--config FILE`, `--flake DIR` and `-q` work before or after the command.
+Every command but `status` and `why` says first which flake and config it
+acts on, since by default both come from `/etc/nixheal.json` or
+`~/.config/nixheal.json`, wherever you run it. A `--config` (or
+`$NIXHEAL_CONFIG`) that cannot be read is an error; a directory without a
+`flake.lock` is refused by every command that writes.
 
 Options of `build`, `switch` and `boot`:
 
 | Option | |
 |---|---|
-| `--update [INPUT...]` | run `nix flake update` first, for all inputs or the named ones |
-| `--dry-run` | build as usual and show what would be pinned and unpinned, then leave every file as it was |
+| `--update [INPUT...]` | run `nix flake update` first, for all inputs or the named ones (an unknown name is an error) |
+| `--dry-run` | evaluate and build as usual and show what would be pinned and unpinned (marked `(dry run)`), then leave every file as it was |
 | `--no-commit` | leave `flake.lock` and `pins.json` uncommitted |
 | `--only NAME` | build only some of the configured hosts and homes; repeatable |
 | `--hold-local` | hold this machine's own host like any other instead of giving up; for a machine that builds a fleet |
-| `--gc-roots DIR` | keep every system that built alive under `DIR/<host>` and `DIR/home-<name>`, e.g. for a binary cache; without `--only`, roots of targets no longer configured are removed |
+| `--gc-roots DIR` | keep every system that built alive under `DIR/nixheal-host-<host>` and `DIR/nixheal-home-<name>`, e.g. for a binary cache; without `--only`, nixheal's roots of targets no longer configured are removed, and nothing else in `DIR` is touched |
 | `--built-link PATH` | a GC root pointing at this machine's built system, removed when it did not build, so a separate step can activate it |
 | `--old-lock FILE` | the lock to pin back to, instead of the last good one |
 | `--max-rounds N` | give up after N build rounds (8) |
 | `--max-new-pins N` | give up on a host that needs more than N new pins in one run (10) |
 | `--system SYSTEM` | the system for eval checks when a target's own cannot be evaluated |
-| `-q`, `--quiet` | print only pins, unpins, holds, warnings and errors, nix's included |
+| `-q`, `--quiet` | print only pins, unpins, holds, warnings and errors; nix's error messages are shown only when nixheal could not handle them |
 
 nixheal works in a dirty tree and only ever commits `flake.lock` and
 `pins.json`, without running git hooks or signing. A run takes a lock on the
@@ -203,6 +220,9 @@ run cannot overlap, and Ctrl-C or SIGTERM puts both files back. A flake path
 containing `#` or `?` is refused, since nix would read those as part of a
 flake reference. On a terminal, builds are shown through
 nix-output-monitor.
+
+Every configured host and home must exist in the flake; a name that does not
+is an error before anything builds.
 
 Exit codes: 0 when everything built or was held, 1 when nixheal gave up on this
 machine's own host, 2 on errors, 130 when interrupted. After a successful build,
@@ -309,9 +329,22 @@ homepage-dashboard `customapi` widget:
 `status` is the most urgent of `STALE` (a pin or hold older than
 `warnAfterDays`), `HELD`, `PINNED` and `OK`. Manual pins never go stale. `items`
 has one row per pin or held host for a `dynamic-list` widget, and a single `OK`
-row when nothing is pinned; homes are named `home NAME`. Ages are in local days
+row when nothing is pinned; homes are named `home NAME`. For scripts, each row
+also has `target`, `target_kind` (`host` or `home`) and `since`, plus `input`
+and `attr` for a pin or `held_reason` for a hold. Ages are in local days
 and computed when it runs, so regenerate it regularly. The text `status` marks
 the same pins and holds `STALE`.
+
+The text `nixheal status`:
+
+```
+flake /home/alice/nixos
+TARGET       PIN                 REASON           SINCE
+host laptop  nixpkgs.open-webui  failed to build  2026-10-20 (8d)
+host server  (held)              held             2026-10-01 (27d) STALE
+    nixpkgs.linux fails and is on the never-pin list (...)
+1 pin(s), 1 held, 1 stale (older than 14 days). 'nixheal why ATTR' shows why a package is pinned.
+```
 
 ## Limitations
 
@@ -326,6 +359,15 @@ the same pins and holds `STALE`.
   glibc update) still fails at switch time.
 - **Configurations are expected at `nixosConfigurations.<host>` and
   `homeConfigurations.<name>`**, with nixheal's module imported in each.
+- **Home Manager inside NixOS with `home-manager.useGlobalPkgs = false`** has
+  its own `pkgs`, but its failures are matched against the host's package
+  sets; a package that differs between the two may hold the host instead of
+  being pinned. Use `useGlobalPkgs = true`, or a standalone Home Manager.
+- **Linux only.** The package is built for x86_64-linux and aarch64-linux.
+- **Nix's log format.** nixheal reads the messages of current Nix (the
+  "Cannot build ... Reason:" format) and the older "builder for ... failed"
+  one; after a failed build it also checks that each system it counts as
+  built really is in the store.
 - **Evaluation dominates the run time.** Each round evaluates every host once,
   one after another, and a dirty git tree gets no evaluation cache. With nh, the
   switch reuses the system nixheal built instead of evaluating again.

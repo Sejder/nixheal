@@ -1,4 +1,4 @@
-use crate::config::{self, Config, Target};
+use crate::config::{self, Config, ROOT_PREFIX, Target};
 use crate::date;
 use crate::engine::{self, Engine};
 use crate::git::Git;
@@ -8,7 +8,7 @@ use crate::log;
 use crate::nix::{self, Nix};
 use crate::pins::{Kind, Pin, PinsFile, Reason};
 use crate::state;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -20,23 +20,33 @@ fn default_system() -> String {
 
 #[derive(clap::Args)]
 pub struct Where {
-    /// Config file; defaults to $NIXHEAL_CONFIG, then ~/.config/nixheal.json,
-    /// then /etc/nixheal.json.
-    #[arg(long, global = true)]
+    /// The config file; by default $NIXHEAL_CONFIG, then
+    /// ~/.config/nixheal.json, then /etc/nixheal.json.
+    #[arg(
+        long,
+        global = true,
+        value_name = "FILE",
+        help_heading = "Global options"
+    )]
     pub config: Option<PathBuf>,
-    /// Flake directory; defaults to the config's flake.
-    #[arg(long, global = true)]
+    /// The flake directory; by default the config's flake, then the current
+    /// directory.
+    #[arg(
+        long,
+        global = true,
+        value_name = "DIR",
+        help_heading = "Global options"
+    )]
     pub flake: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
 pub struct BuildArgs {
-    #[command(flatten)]
-    pub at: Where,
     /// Run nix flake update first; only the named inputs when given.
     #[arg(long, num_args = 0.., value_name = "INPUT")]
     pub update: Option<Vec<String>>,
-    /// Show what would be pinned and unpinned, then put every file back.
+    /// Evaluate and build as usual and report what would be pinned and
+    /// unpinned, then restore flake.lock and pins.json.
     #[arg(long)]
     pub dry_run: bool,
     /// Leave flake.lock and pins.json uncommitted.
@@ -48,25 +58,28 @@ pub struct BuildArgs {
     pub hold_local: bool,
     /// Point this symlink at the machine's own system once it built, and
     /// remove it otherwise, so a separate step can activate it.
-    #[arg(long)]
+    #[arg(long, value_name = "PATH")]
     pub built_link: Option<PathBuf>,
     /// Only these hosts or homes from the config; repeatable.
-    #[arg(long = "only")]
+    #[arg(long = "only", value_name = "NAME")]
     pub only: Vec<String>,
-    /// The last lock that built; defaults to the one nixheal last saw build.
-    #[arg(long)]
+    /// The lock to pin back to; by default the one each target last built with.
+    #[arg(long, value_name = "FILE")]
     pub old_lock: Option<PathBuf>,
-    #[arg(long, default_value_t = 8)]
+    /// Give up after this many evaluate-and-build rounds.
+    #[arg(long, value_name = "N", default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_rounds: u32,
-    /// Give up on a host rather than add more than this many new pins to it.
-    #[arg(long, default_value_t = 10)]
+    /// Hold a host, or give up on this machine's own, rather than add more
+    /// than this many new pins to it in one run.
+    #[arg(long, value_name = "N", default_value_t = 10)]
     pub max_new_pins: usize,
-    /// Used for eval checks when a target's own system cannot be evaluated.
-    #[arg(long, default_value_t = default_system())]
+    /// The system for eval checks when a target's own cannot be evaluated.
+    #[arg(long, value_name = "SYSTEM", default_value_t = default_system())]
     pub system: String,
     /// Keep every system that built alive with a GC root in this directory,
-    /// e.g. for a binary cache to serve them.
-    #[arg(long)]
+    /// e.g. for a binary cache to serve them. Roots nixheal made there for
+    /// targets no longer configured are removed; nothing else is touched.
+    #[arg(long, value_name = "DIR")]
     pub gc_roots: Option<PathBuf>,
 }
 
@@ -79,40 +92,85 @@ pub enum Activation {
 
 #[derive(clap::Args)]
 pub struct Pick {
-    #[command(flatten)]
-    pub at: Where,
-    /// A NixOS host; defaults to the machine's own entry.
-    #[arg(long, conflicts_with = "home")]
+    /// A NixOS host; by default this machine's own host or home.
+    #[arg(long, value_name = "NAME", conflicts_with = "home")]
     pub host: Option<String>,
     /// A Home Manager configuration.
-    #[arg(long)]
+    #[arg(long, value_name = "NAME")]
     pub home: Option<String>,
 }
 
 struct Ctx {
     config: Option<Config>,
+    config_path: Option<PathBuf>,
     flake: PathBuf,
+    /// Where the flake directory came from, for error messages.
+    source: String,
 }
 
 impl Ctx {
+    /// The config and flake a command acts on. A config named by --config or
+    /// $NIXHEAL_CONFIG must load; one found by itself is skipped with a
+    /// warning when the command can do without.
     fn open(at: &Where, need_config: bool) -> Result<Self> {
-        let config = match config::load(at.config.as_deref()) {
-            Ok(c) => {
-                log::set_quiet(c.quiet);
-                Some(c)
+        let (config, config_path) = match config::locate(at.config.as_deref()) {
+            None if need_config => return Err(config::missing()),
+            None => (None, None),
+            Some(found) => match config::read(&found.path) {
+                Ok(c) => {
+                    log::set_quiet(c.quiet);
+                    (Some(c), Some(found.path))
+                }
+                Err(e) if need_config || found.explicit => return Err(e),
+                Err(e) => {
+                    log::warn(&format!("ignoring {}: {e:#}", found.path.display()));
+                    (None, None)
+                }
+            },
+        };
+        let (flake, source) = match (&at.flake, config.as_ref().and_then(|c| c.flake.clone())) {
+            (Some(f), _) => (f.clone(), "from --flake".to_string()),
+            (None, Some(f)) => (
+                PathBuf::from(f),
+                format!(
+                    "programs.nixheal.flake in {}",
+                    config_path.as_deref().unwrap_or(Path::new("?")).display()
+                ),
+            ),
+            (None, None) => (std::env::current_dir()?, "the current directory".into()),
+        };
+        let flake = match flake.canonicalize() {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+                "flake directory {} does not exist ({source}); pass --flake DIR",
+                flake.display()
+            ),
+            Err(e) => {
+                return Err(anyhow!(e).context(format!(
+                    "resolving the flake directory {} ({source})",
+                    flake.display()
+                )));
             }
-            Err(e) if need_config => return Err(e),
-            Err(_) => None,
         };
-        let flake = match (&at.flake, config.as_ref().and_then(|c| c.flake.clone())) {
-            (Some(f), _) => f.clone(),
-            (None, Some(f)) => PathBuf::from(f),
-            (None, None) => std::env::current_dir()?,
-        };
-        let flake = flake
-            .canonicalize()
-            .with_context(|| format!("resolving {}", flake.display()))?;
-        Ok(Self { config, flake })
+        Ok(Self {
+            config,
+            config_path,
+            flake,
+            source,
+        })
+    }
+
+    /// Which flake and config a command acts on, said first, since both can
+    /// come from far away (/etc/nixheal.json from any directory).
+    fn announce(&self) {
+        match &self.config_path {
+            Some(c) => log::info(&format!(
+                "flake {} (config {})",
+                self.flake.display(),
+                c.display()
+            )),
+            None => log::info(&format!("flake {}", self.flake.display())),
+        }
     }
 
     fn pins_path(&self) -> PathBuf {
@@ -125,6 +183,37 @@ impl Ctx {
             (_, Some(h), _) => Ok(Target::new(Kind::Home, h)),
             (None, None, Some(c)) => Ok(c.local()),
             (None, None, None) => bail!("no config to take the host from; pass --host or --home"),
+        }
+    }
+
+    /// The flags that name `target` on the command line, empty for this
+    /// machine's own entry.
+    fn flag_for(&self, target: &Target) -> String {
+        if self.config.as_ref().map(Config::local).as_ref() == Some(target) {
+            return String::new();
+        }
+        match target.kind {
+            Kind::Nixos => format!(" --host {}", target.name),
+            Kind::Home => format!(" --home {}", target.name),
+        }
+    }
+
+    /// For an attr that is not pinned on `target`: where it is pinned instead.
+    fn pinned_elsewhere(&self, file: &PinsFile, target: &Target, attr: &str) -> String {
+        let others: Vec<String> = file
+            .entries()
+            .filter(|(k, n, e)| {
+                !(*k == target.kind && *n == target.name) && !e.inputs_pinning(attr).is_empty()
+            })
+            .map(|(k, n, _)| {
+                let t = Target::new(k, n);
+                format!("{t} (pass{})", self.flag_for(&t))
+            })
+            .collect();
+        if others.is_empty() {
+            String::new()
+        } else {
+            format!("; it is pinned on {}", others.join(", "))
         }
     }
 }
@@ -217,21 +306,19 @@ fn activate(
 }
 
 /// Remove GC roots nixheal made for targets that are no longer configured,
-/// so their systems can be collected. Only symlinks with nixheal's names are
-/// touched.
+/// so their systems can be collected. Only symlinks named with nixheal's
+/// prefix are touched; other roots in the directory are left alone.
 fn prune_roots(dir: &Path, targets: &[Target]) -> Result<()> {
     let keep: Vec<String> = targets.iter().map(Target::root_name).collect();
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.file_type()?.is_symlink() && !keep.contains(&name) {
-            let target = std::fs::read_link(entry.path())?;
-            if target.to_string_lossy().contains("/nix/") {
-                std::fs::remove_file(entry.path())?;
-                log::info(&format!(
-                    "removed the root of {name}, which is no longer configured"
-                ));
-            }
+        if name.starts_with(ROOT_PREFIX) && entry.file_type()?.is_symlink() && !keep.contains(&name)
+        {
+            std::fs::remove_file(entry.path())?;
+            log::info(&format!(
+                "removed the root {name}: its target is no longer configured"
+            ));
         }
     }
     Ok(())
@@ -246,10 +333,19 @@ fn remove_link(link: &Path) -> Result<()> {
     }
 }
 
-/// Refuse setups where a run would do damage: running as root in a checkout
-/// someone else owns, or a flake that is a store path and cannot be written.
-fn check_flake(flake: &Path) -> Result<()> {
+/// Refuse setups where a command that writes would do damage or write to the
+/// wrong place: a directory that is not a locked flake, running as root in a
+/// checkout someone else owns, or a flake that is a store path.
+fn check_flake(ctx: &Ctx) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
+    let flake = ctx.flake.as_path();
+    if !flake.join("flake.lock").is_file() {
+        bail!(
+            "no flake.lock in {} ({}); nixheal needs a locked flake: pass --flake DIR, or run nix flake lock there",
+            flake.display(),
+            ctx.source
+        );
+    }
     let text = flake.to_string_lossy();
     if text.contains('#') || text.contains('?') {
         bail!(
@@ -275,10 +371,33 @@ fn check_flake(flake: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
+/// The counts of a run's changes, as the closing line reports them.
+fn tally(changes: &[String]) -> String {
+    let count = |prefix: &str| changes.iter().filter(|c| c.starts_with(prefix)).count();
+    let mut parts = Vec::new();
+    for (prefix, word) in [
+        ("pinned ", "pinned"),
+        ("unpinned ", "unpinned"),
+        ("held ", "held"),
+        ("released ", "released"),
+    ] {
+        let n = count(prefix);
+        if n > 0 {
+            parts.push(format!("{n} {word}"));
+        }
+    }
+    if parts.is_empty() {
+        "no pins changed".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
+pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCode> {
     let update = args.update.as_deref();
-    let ctx = Ctx::open(&args.at, true)?;
+    let ctx = Ctx::open(at, true)?;
     let cfg = ctx.config.clone().expect("config required");
+    ctx.announce();
     let mut targets = cfg.targets();
     if !args.only.is_empty() {
         let unknown: Vec<&String> = args
@@ -311,19 +430,38 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
     // fleet: holding it would leave it running an old system unnoticed.
     let guarded = local.clone().filter(|_| !args.hold_local);
 
-    check_flake(&ctx.flake)?;
+    check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
-    if !args.dry_run
-        && let Some(link) = &args.built_link
-    {
-        remove_link(link)?;
-    }
 
     let git = Git::open(&ctx.flake);
     let pins_path = ctx.pins_path();
     let lock_path = ctx.flake.join("flake.lock");
     let orig_lock =
         std::fs::read(&lock_path).with_context(|| format!("reading {}", lock_path.display()))?;
+    if let Some(names) = update {
+        let known = Lock::from_bytes(orig_lock.clone())
+            .with_context(|| format!("parsing {}", lock_path.display()))?
+            .inputs();
+        let unknown: Vec<&str> = names
+            .iter()
+            .filter(|n| !known.contains(n))
+            .map(String::as_str)
+            .collect();
+        if !unknown.is_empty() {
+            let mut known = known;
+            known.sort();
+            bail!(
+                "--update {}: not an input of flake.lock (its inputs: {})",
+                unknown.join(", "),
+                known.join(", ")
+            );
+        }
+    }
+    if !args.dry_run
+        && let Some(link) = &args.built_link
+    {
+        remove_link(link)?;
+    }
     let created_pins = ensure_pins(&pins_path, git.as_ref())?;
     let orig_pins = if created_pins {
         None
@@ -382,7 +520,10 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         warn_after_days: cfg.warn_after_days,
         today: date::today(),
     };
-    let report = match engine.run() {
+    log::set_dry_run(args.dry_run);
+    let report = engine.run();
+    log::set_dry_run(false);
+    let report = match report {
         Ok(r) => r,
         Err(e) => {
             guard::restore()?;
@@ -390,27 +531,26 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         }
     };
 
-    if let Some(why) = &report.local_failure {
+    if report.local_failure.is_some() {
         guard::restore()?;
-        log::change(&format!("not activating: {why}"));
-        log::change("restored flake.lock and pins.json; nothing was committed");
+        log::change(
+            "restored flake.lock and pins.json; nothing was committed or activated. Fix that failure, or pass --hold-local to hold this host and update the others",
+        );
         return Ok(ExitCode::from(1));
     }
 
     if args.dry_run {
         guard::restore()?;
-        if report.changes.is_empty() {
-            log::change("dry run: no pins would change");
-        }
-        for c in &report.changes {
-            log::change(&format!("dry run: would have {c}"));
-        }
+        log::change(&format!(
+            "dry run: {}; restored flake.lock and pins.json, nothing was committed or activated",
+            tally(&report.changes)
+        ));
         return Ok(ExitCode::SUCCESS);
     }
 
     // From here the run's results stand or fall together: any error before
     // the commit puts flake.lock and pins.json back.
-    let settled = (|| -> Result<()> {
+    let settled = (|| -> Result<Option<String>> {
         if let Some(dir) = &args.gc_roots {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             for (target, drv) in &report.built {
@@ -426,9 +566,10 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
             ));
         }
         guard::settle(|| {
-            if !args.no_commit
-                && let Some(git) = &git
-            {
+            if args.no_commit {
+                return Ok(Some("left uncommitted (--no-commit)".into()));
+            }
+            if let Some(git) = &git {
                 let title = if update.is_some() {
                     "nixheal: update flake.lock"
                 } else {
@@ -440,18 +581,31 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
                     message.push_str(&report.changes.join("\n"));
                 }
                 if git.commit(&[&lock_path, &pins_path], &message)? {
-                    log::info(&format!("committed {title:?}"));
+                    return Ok(Some(match git.head() {
+                        Some(h) => format!("committed {h} {title:?}"),
+                        None => format!("committed {title:?}"),
+                    }));
                 }
+                return Ok(Some("nothing to commit".into()));
             }
-            Ok(())
+            Ok(None)
         })
     })();
-    if let Err(e) = settled {
-        guard::restore()?;
-        return Err(e.context("restored flake.lock and pins.json"));
-    }
+    let committed = match settled {
+        Ok(c) => c,
+        Err(e) => {
+            guard::restore()?;
+            return Err(e.context("restored flake.lock and pins.json"));
+        }
+    };
+    log::info(&format!(
+        "done: {} built, {}{}",
+        report.built.len(),
+        tally(&report.changes),
+        committed.map(|c| format!("; {c}")).unwrap_or_default()
+    ));
 
-    // Only now, with the results committed, are these locks known to build.
+    // Only now, with the results kept, are these locks known to build.
     for (target, _) in &report.built {
         state::save_last_good(&ctx.flake, Some(target), &engine.new_lock)?;
     }
@@ -474,7 +628,9 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
     match &local {
         Some(target) if report.local_held => {
             if how != Activation::None {
-                log::change(&format!("not activating: {target} is held"));
+                log::warn(&format!(
+                    "not activating: {target} is held; see nixheal status"
+                ));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -492,110 +648,183 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
 
 pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
-    check_flake(&ctx.flake)?;
+    ctx.announce();
+    check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
+    let bytes = std::fs::read(other).with_context(|| format!("reading {}", other.display()))?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", other.display()))?;
+    if raw.get("version").is_none() {
+        bail!(
+            "{} is not a nixheal pins file (no version)",
+            other.display()
+        );
+    }
+    let incoming =
+        PinsFile::parse(&bytes).with_context(|| format!("parsing {}", other.display()))?;
     let pins_path = ctx.pins_path();
     ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
     let mut file = PinsFile::load(&pins_path)?;
-    let incoming = PinsFile::load(other)?;
     let mut taken = 0;
     for (kind, name, entry) in incoming.entries() {
+        let target = Target::new(kind, name);
         if file.entry(kind, name) == Some(entry) {
             continue;
         }
         if file.merge(kind, name, entry.clone()) {
             taken += 1;
-            log::info(&format!(
-                "took {} from {}",
-                Target::new(kind, name),
-                other.display()
-            ));
+            log::info(&format!("took {target} from {}", other.display()));
         } else {
             log::info(&format!(
-                "kept {}: it comes from a newer lock",
-                Target::new(kind, name)
+                "kept {target}: the entry here comes from a newer lock"
             ));
         }
     }
     file.save(&pins_path)?;
-    log::info(&format!(
-        "merged {} entr{} into {}",
+    log::change(&format!(
+        "merged {} entr{} from {} into {}{}",
         taken,
         if taken == 1 { "y" } else { "ies" },
-        pins_path.display()
+        other.display(),
+        pins_path.display(),
+        if taken > 0 {
+            "; the next build commits it"
+        } else {
+            ""
+        }
     ));
     Ok(ExitCode::SUCCESS)
 }
 
+fn reason_words(reason: Reason) -> &'static str {
+    match reason {
+        Reason::Build => "failed to build",
+        Reason::Eval => "failed to evaluate",
+        Reason::Manual => "pinned by hand",
+    }
+}
+
 pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
-    let file = PinsFile::load(&ctx.pins_path())?;
+    let pins_path = ctx.pins_path();
+    let file = PinsFile::load(&pins_path)?;
     let today = date::today();
     let warn = ctx.config.as_ref().map_or(14, |c| c.warn_after_days);
     if json {
         println!("{}", crate::summary::summary(&file, today, warn));
         return Ok(ExitCode::SUCCESS);
     }
-    let mut any = false;
+    println!("flake {}", ctx.flake.display());
+    if !pins_path.exists() {
+        println!(
+            "no pins.json in {}; nixheal creates it on its first build",
+            ctx.flake.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    struct Row {
+        target: String,
+        what: String,
+        reason: String,
+        since: String,
+        note: Option<String>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    let (mut pins, mut held, mut stale) = (0, 0, 0);
+    let mut since = |date_text: &str, manual: bool| {
+        let age = date::parse(date_text).map(|d| today - d);
+        let old = !manual && age.is_none_or(|a| a > warn);
+        if old {
+            stale += 1;
+        }
+        format!(
+            "{date_text} ({}d){}",
+            age.map_or("?".into(), |a| a.to_string()),
+            if old { " STALE" } else { "" }
+        )
+    };
     for (kind, name, entry) in file.entries() {
-        let target = Target::new(kind, name);
-        let stale = |since: &str, manual: bool| {
-            let age = date::parse(since).map(|d| today - d);
-            let flag = if !manual && age.is_none_or(|a| a > warn) {
-                "  STALE"
-            } else {
-                ""
-            };
-            (age.map_or("?".into(), |a| a.to_string()), flag)
-        };
+        let target = Target::new(kind, name).to_string();
         if let Some(h) = &entry.held {
-            any = true;
-            let (age, flag) = stale(&h.since, false);
-            println!(
-                "{target}\theld\tsince {} ({age}d){flag}\t{}",
-                h.since, h.reason
-            );
+            held += 1;
+            rows.push(Row {
+                target: target.clone(),
+                what: "(held)".into(),
+                reason: "held".into(),
+                since: since(&h.since, false),
+                note: Some(h.reason.clone()),
+            });
         }
         for (input, attr, pin) in entry.iter() {
-            any = true;
-            let age = date::parse(&pin.since).map(|d| today - d);
-            let (_, flag) = stale(&pin.since, pin.reason == Reason::Manual);
-            println!(
-                "{target}\t{input}.{attr}\t{}\tsince {} ({}d){flag}",
-                pin.reason.as_str(),
-                pin.since,
-                age.map_or("?".into(), |a| a.to_string())
-            );
+            pins += 1;
+            rows.push(Row {
+                target: target.clone(),
+                what: format!("{input}.{attr}"),
+                reason: reason_words(pin.reason).into(),
+                since: since(&pin.since, pin.reason == Reason::Manual),
+                note: None,
+            });
         }
     }
-    if !any {
-        println!("no pins");
+    if rows.is_empty() {
+        println!("no pins and nothing held");
+        return Ok(ExitCode::SUCCESS);
     }
+    let width = |f: fn(&Row) -> &str, title: &str| {
+        rows.iter()
+            .map(|r| f(r).len())
+            .chain([title.len()])
+            .max()
+            .unwrap_or(0)
+    };
+    let (wt, ww, wr) = (
+        width(|r| &r.target, "TARGET"),
+        width(|r| &r.what, "PIN"),
+        width(|r| &r.reason, "REASON"),
+    );
+    println!("{:wt$}  {:ww$}  {:wr$}  SINCE", "TARGET", "PIN", "REASON");
+    for r in &rows {
+        println!(
+            "{:wt$}  {:ww$}  {:wr$}  {}",
+            r.target, r.what, r.reason, r.since
+        );
+        if let Some(note) = &r.note {
+            println!("    {note}");
+        }
+    }
+    println!(
+        "{pins} pin(s), {held} held, {stale} stale (older than {warn} days). 'nixheal why ATTR' shows why a package is pinned."
+    );
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn why(pick: &Pick, attr: &str) -> Result<ExitCode> {
-    let ctx = Ctx::open(&pick.at, false)?;
+pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
+    let ctx = Ctx::open(at, false)?;
     let target = ctx.target(pick)?;
     let file = PinsFile::load(&ctx.pins_path())?;
-    let Some(entry) = file.entry(target.kind, &target.name) else {
-        bail!("{target} has no entry in {PINS}");
-    };
-    let inputs = entry.inputs_pinning(attr);
+    let inputs = file
+        .entry(target.kind, &target.name)
+        .map(|e| e.inputs_pinning(attr))
+        .unwrap_or_default();
     if inputs.is_empty() {
-        bail!("{attr} is not pinned on {target}");
+        bail!(
+            "{attr} is not pinned on {target}{}",
+            ctx.pinned_elsewhere(&file, &target, attr)
+        );
     }
+    let entry = file.entry(target.kind, &target.name).expect("has pins");
     for input in inputs {
         let pin = entry.get(&input, attr).expect("listed input");
         println!("{target}: {input}.{attr}");
-        println!("  reason:   {}", pin.reason.as_str());
-        println!("  since:    {}", pin.since);
-        println!("  pinned at {}", engine::describe(&pin.locked));
+        println!("  reason:    {}", reason_words(pin.reason));
+        println!("  since:     {}", pin.since);
+        println!("  pinned at: {} ({input})", engine::describe(&pin.locked));
         if let Some(drv) = &pin.failed_drv {
-            println!("  failed:   {drv}");
+            println!("  failed:    {drv}");
         }
         if !pin.trail.is_empty() {
-            println!("  trail:    {}", pin.trail.join(" -> "));
+            println!("  trail:     {}", pin.trail.join(" -> "));
         }
         if let Some(drv) = &pin.failed_drv
             && let Some(log) = nix::log_tail(drv, 20)
@@ -605,16 +834,18 @@ pub fn why(pick: &Pick, attr: &str) -> Result<ExitCode> {
                 println!("    {line}");
             }
         }
+        println!("  undo with: nixheal clear {attr}{}", ctx.flag_for(&target));
     }
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn pin(pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
+pub fn pin(at: &Where, pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
     if !crate::resolve::is_attr_name(attr) {
         bail!("{attr:?} is not a top-level attribute name");
     }
-    let ctx = Ctx::open(&pick.at, false)?;
-    check_flake(&ctx.flake)?;
+    let ctx = Ctx::open(at, false)?;
+    ctx.announce();
+    check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
     let target = ctx.target(pick)?;
     let input = input
@@ -624,7 +855,12 @@ pub fn pin(pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
     let input = input.as_str();
     let lock = Lock::load(&ctx.flake.join("flake.lock"))?;
     let Some(locked) = lock.locked(input) else {
-        bail!("{input} is not an input of flake.lock");
+        let mut known = lock.inputs();
+        known.sort();
+        bail!(
+            "{input} is not an input of flake.lock (its inputs: {}); pass --input",
+            known.join(", ")
+        );
     };
     let checked = lock.nar_hash(input).unwrap_or_default();
     let system = Nix::new(&ctx.flake)
@@ -639,8 +875,16 @@ pub fn pin(pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
     let pins_path = ctx.pins_path();
     ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
     let mut file = PinsFile::load(&pins_path)?;
-    let at = engine::describe(&locked);
-    file.entry_mut(target.kind, &target.name).insert(
+    let at_rev = engine::describe(&locked);
+    let entry = file.entry_mut(target.kind, &target.name);
+    if let Some(old) = entry.get(input, attr) {
+        log::change(&format!(
+            "{target}: {input}.{attr} was already pinned ({}, since {}); replacing it with a pin by hand",
+            reason_words(old.reason),
+            old.since
+        ));
+    }
+    entry.insert(
         input,
         attr,
         Pin {
@@ -653,23 +897,36 @@ pub fn pin(pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
         },
     );
     file.save(&pins_path)?;
-    println!("pinned {target}: {input}.{attr} at {at}; it stays until nixheal clear");
+    log::change(&format!(
+        "pinned {target}: {input}.{attr} at {at_rev} by hand; it stays until 'nixheal clear {attr}{}'. The next build, switch or boot applies and commits it",
+        ctx.flag_for(&target)
+    ));
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn clear(pick: &Pick, attr: Option<&str>, input: Option<&str>, held: bool) -> Result<ExitCode> {
-    let ctx = Ctx::open(&pick.at, false)?;
-    check_flake(&ctx.flake)?;
+pub fn clear(
+    at: &Where,
+    pick: &Pick,
+    attr: Option<&str>,
+    input: Option<&str>,
+    held: bool,
+) -> Result<ExitCode> {
+    let ctx = Ctx::open(at, false)?;
+    ctx.announce();
+    check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
     let target = ctx.target(pick)?;
     let pins_path = ctx.pins_path();
     let mut file = PinsFile::load(&pins_path)?;
+    let elsewhere = attr.map(|a| ctx.pinned_elsewhere(&file, &target, a));
     let entry = file.entry_mut(target.kind, &target.name);
     if held {
         if entry.held.take().is_none() {
             bail!("{target} is not held");
         }
-        println!("released {target}");
+        log::change(&format!(
+            "released {target}; the next build, switch or boot builds it with the current lock"
+        ));
     } else {
         let Some(attr) = attr else {
             bail!("name an attr to clear, or pass --held");
@@ -683,10 +940,15 @@ pub fn clear(pick: &Pick, attr: Option<&str>, input: Option<&str>, held: bool) -
             .filter(|i| entry.remove(i, attr).is_some())
             .collect();
         if removed.is_empty() {
-            bail!("{attr} is not pinned on {target}");
+            bail!(
+                "{attr} is not pinned on {target}{}",
+                elsewhere.unwrap_or_default()
+            );
         }
         for i in removed {
-            println!("cleared {target}: {i}.{attr}");
+            log::change(&format!(
+                "cleared {target}: {i}.{attr}; the next build, switch or boot builds it from the current lock, and pins it again if it still fails"
+            ));
         }
     }
     file.save(&pins_path)?;

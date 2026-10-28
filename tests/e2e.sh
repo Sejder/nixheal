@@ -108,10 +108,10 @@ nixheal_() {
 
 revision() {
   cat >"$toy/state.nix" <<EOF
-{ libfoo = "$1"; goneRemoved = $2; hello = "$3"; linux = "$4"; moduleError = ${5:-false}; salt = "$salt"; }
+{ libfoo = "$1"; goneRemoved = $2; hello = "$3"; linux = "$4"; moduleError = ${5:-false}; extra = "${6:-ok}"; salt = "$salt"; }
 EOF
   git -C "$toy" add -A
-  git -C "$toy" commit -qm "libfoo=$1 gone-removed=$2 hello=$3 linux=$4"
+  git -C "$toy" commit -qm "libfoo=$1 gone-removed=$2 hello=$3 linux=$4 extra=${6:-ok}"
 }
 
 [ -x "$nixheal" ] || fail "$nixheal is not built; run cargo build first"
@@ -152,6 +152,25 @@ let
       if state.linux == "broken" then broken "linux" else "echo linux-${state.linux} > $out"
     );
     gone = if state.goneRemoved then throw "'gone' has been removed" else mk "gone-1.0" "gone" [ ] "echo gone > $out";
+    corelib = mk "corelib-1.0" "corelib" [ ] (
+      if state.extra == "corebroken" then broken "corelib" else "echo corelib > $out"
+    );
+    tool = mk "tool-1.0" "tool" (builtins.genList (
+      i: mk "pydep-${toString i}-1.0" "pydep-${toString i}" [ self.corelib ] "echo pydep $deps > $out"
+    ) 30) "echo tool > $out";
+    webui = mk "webui-1.0" "webui" [
+      (if state.extra == "innergone" then throw "'innerlib' has been removed" else self.libfoo)
+    ] "echo webui $deps > $out";
+    fetched = derivation {
+      name = if state.extra == "fodfail" then "fetched-1.1" else "fetched-1.0";
+      pname = "fetched";
+      inherit system;
+      builder = "/bin/sh";
+      args = [ "-c" (if state.extra == "fodfail" then "exit 1" else "printf x > $out") ];
+      outputHashMode = "flat";
+      outputHashAlgo = "sha256";
+      outputHash = "sha256-LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=";
+    };
   };
   extend = f: o: self: let prev = f self; in prev // o self prev;
   fix = f: let x = f x; in x;
@@ -202,6 +221,7 @@ cat >"$sys/flake.nix" <<EOF
     in {
       nixosConfigurations.a = mkHost "a" (p: [ p.hello p.gone ]);
       nixosConfigurations.b = mkHost "b" (p: [ p.app p.hello p.linux ]);
+      nixosConfigurations.c = mkHost "c" (p: [ p.tool p.webui p.fetched ]);
       homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]) { };
       nixosConfigurations.misnamed = mkHostOf "hosts" "misnamed" (p: [ p.hello ]) { name = "other"; };
       nixosConfigurations.elsewhere = mkHostOf "hosts" "elsewhere" (p: [ p.hello ]) { pinsFile = ./sub/pins.json; };
@@ -244,7 +264,7 @@ since_gone="$(field a toypkgs gone since)"
 step "why: explain the app pin on b"
 nixheal_ why app --host b || fail "nixheal why failed"
 expect_log "-libfoo-1.0.drv"
-expect_log "trail:    libfoo-1.0 -> app-2.0"
+expect_log "trail:     libfoo-1.0 -> app-2.0"
 expect_log "libfoo does not compile"
 
 step "r2 switch: no update, so nothing is retried and nothing is committed"
@@ -269,13 +289,13 @@ step "r4: linux breaks on b (denylisted): b is held on the r3 lock, a moves on"
 revision fixed true 4 broken
 nixheal_ switch --update || fail "nixheal update gave up on r4"
 expect_log "held host b on its last good lock"
-case "$(held_reason b)" in *"linux fails but is never pinned"*) ;; *) fail "b should be held for linux: $(held_reason b)" ;; esac
+case "$(held_reason b)" in *"linux fails and is on the never-pin list"*) ;; *) fail "b should be held for linux: $(held_reason b)" ;; esac
 held_rev="$(jq_pins 'f.hosts.b.held.lock.nodes.toypkgs.locked.rev')"
 r3_rev="$(nix eval --raw --impure --expr "(builtins.fromJSON (builtins.readFile $r3_lock)).nodes.toypkgs.locked.rev")"
 [ "$held_rev" = "$r3_rev" ] || fail "b is held on $held_rev, expected the r3 lock $r3_rev"
 expect_built a hello-4
 nixheal_ status || fail "nixheal status failed"
-expect_log "host b	held	since"
+expect_log "(held)"
 
 step "r5: linux is fixed and gone is back: b is released, a unpins"
 revision fixed false 5 ok
@@ -311,8 +331,8 @@ write_config ""
 step "r6 dry run, quiet: shows the hello pins and nothing else, writes nothing"
 nixheal_ -q switch --update --dry-run || fail "the dry run gave up"
 reject_log "round 1:"
-expect_log "dry run: would have pinned host a: toypkgs.hello"
-expect_log "dry run: would have pinned host b: toypkgs.hello"
+expect_log "(dry run) pinned host a: toypkgs.hello"
+expect_log "(dry run) pinned host b: toypkgs.hello"
 cmp -s "$sys/flake.lock" "$work/before.lock" || fail "the dry run changed flake.lock"
 cmp -s "$sys/pins.json" "$work/before.json" || fail "the dry run changed pins.json"
 [ "$(commits)" = "$before_commits" ] || fail "the dry run committed"
@@ -335,16 +355,21 @@ write_config '"gone"'
 revision fixed true 7 ok
 before_calls="$(nh_calls)"
 before_commits="$(commits)"
+mkdir -p "$work/roots"
+ln -sfn /nix/store/not-nixheals "$work/roots/result"
+ln -sfn /nix/store/an-old-host "$work/roots/nixheal-host-old"
 nixheal_ build --update --hold-local --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
+[ -L "$work/roots/result" ] || fail "--gc-roots removed a root nixheal did not make"
+[ -L "$work/roots/nixheal-host-old" ] && fail "--gc-roots kept the root of a host no longer configured"
 expect_log "held host a on its last good lock"
 reject_log "giving up on host a"
-case "$(held_reason a)" in *"gone fails but is never pinned"*) ;; *) fail "a should be held for gone: $(held_reason a)" ;; esac
+case "$(held_reason a)" in *"gone fails and is on the never-pin list"*) ;; *) fail "a should be held for gone: $(held_reason a)" ;; esac
 [ -z "$(held_reason b)" ] || fail "b should not be held"
 [ "$(nh_calls)" = "$before_calls" ] || fail "a fleet run switched"
 [ "$(commits)" = "$before_commits" ] || fail "a --no-commit run committed"
 git -C "$sys" diff --quiet -- flake.lock && fail "the fleet run restored flake.lock"
-[ -L "$work/roots/b" ] || fail "no GC root for b"
-[ -e "$work/roots/a" ] && fail "a GC root for the held host a"
+[ -L "$work/roots/nixheal-host-b" ] || fail "no GC root for b"
+[ -e "$work/roots/nixheal-host-a" ] && fail "a GC root for the held host a"
 expect_log "rooted 1 system(s)"
 write_config ""
 
@@ -358,7 +383,7 @@ mkpins() {
 mkpins -100 older "$work/older.json"
 mkpins 100 newer "$work/newer.json"
 nixheal_ merge "$work/older.json" || fail "merge failed"
-expect_log "kept host b: it comes from a newer lock"
+expect_log "kept host b: the entry here comes from a newer lock"
 expect_pins b ""
 nixheal_ merge "$work/newer.json" || fail "merge failed"
 expect_log "took host b from"
@@ -519,6 +544,92 @@ cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restore
 cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored after the platform mismatch"
 revision fixed false 15 ok
 nixheal_ build --update || fail "nixheal build gave up after the platform mismatch"
+
+step "c builds: a host with a widely used library, a nested package and a download"
+write_config "" "" '"c"'
+revision fixed false 16 ok false ok
+nixheal_ build --update || fail "c did not build"
+expect_pins c ""
+
+step "a library 31 packages depend on is not pinned, even though only one is a top-level attribute"
+revision fixed false 17 ok false corebroken
+nixheal_ build --update --no-commit || fail "the corelib run gave up"
+case "$(held_reason c)" in *"corelib-1.0 is used by 31 other packages"*) ;; *) fail "c should be held for corelib: $(held_reason c)" ;; esac
+expect_pins c ""
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "an evaluation failure inside a nested package pins the package that uses it"
+revision fixed false 18 ok false innergone
+nixheal_ build --update --no-commit || fail "the innerlib run gave up"
+expect_log "innerlib is not pinnable itself; webui, which evaluation fails inside, is"
+expect_pins c "toypkgs.webui"
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "a failed download is built once more, then pinned"
+revision fixed false 19 ok false fodfail
+nixheal_ build --update --no-commit || fail "the download run gave up"
+expect_log "building once more before deciding"
+expect_pins c "toypkgs.fetched"
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "--old-lock: a new pin comes from the given lock"
+write_config "" "" '"b"'
+revision fixed false broken ok
+nixheal_ build --update --no-commit --old-lock "$r3_lock" || fail "the --old-lock run gave up"
+expect_pins b "toypkgs.hello"
+[ "$(field b toypkgs hello locked.rev)" = "$r3_rev" ] || fail "hello was pinned at $(field b toypkgs hello locked.rev), not the --old-lock revision $r3_rev"
+git -C "$sys" checkout -q -- flake.lock pins.json
+revision fixed false 20 ok
+write_config ""
+nixheal_ build --update || fail "nixheal build gave up after the --old-lock revision"
+
+step "a host that is not in the flake is refused before anything builds"
+write_config "" "" '"a", "bb"'
+if nixheal_ build; then fail "a typo in hosts should be refused"; fi
+expect_log "programs.nixheal.hosts lists bb, which nixosConfigurations does not have"
+reject_log "round 1"
+write_config ""
+
+step "--update with an input the flake does not have is refused"
+if nixheal_ build --update nixpkgs; then fail "--update nixpkgs should be refused"; fi
+expect_log "--update nixpkgs: not an input of flake.lock (its inputs: toypkgs)"
+reject_log "round 1"
+
+step "merge: a missing file or one that is not a pins file is an error, and held entries come through"
+if nixheal_ merge "$work/missing.json"; then fail "merging a missing file succeeded"; fi
+expect_log "reading $work/missing.json"
+printf '{}\n' >"$work/empty.json"
+if nixheal_ merge "$work/empty.json"; then fail "merging {} succeeded"; fi
+expect_log "is not a nixheal pins file"
+nix eval --impure --json --expr "
+  let f = builtins.fromJSON (builtins.readFile $sys/pins.json); b = f.hosts.b; in
+  f // { hosts = f.hosts // { b = b // { lockLastModified = b.lockLastModified + 100;
+    held = { since = \"2026-01-01\"; reason = \"held by the fleet\"; lock = builtins.fromJSON (builtins.readFile $sys/flake.lock); }; }; }; }" >"$work/held.json"
+nixheal_ merge "$work/held.json" || fail "merging a held entry failed"
+[ "$(held_reason b)" = "held by the fleet" ] || fail "the held entry did not come through: $(held_reason b)"
+git -C "$sys" checkout -q -- pins.json
+
+step "the command line: global flags, status, why and clear say where to look"
+"$nixheal" --config "$config" --flake "$sys" status >"$work/stdout" 2>"$log" || fail "--flake before the subcommand was refused: $(cat "$log")"
+grep -qF "flake $sys" "$work/stdout" || fail "status does not name the flake"
+"$nixheal" pin hello --host b --input toypkgs --config "$config" 2>"$log" || fail "pinning hello on b failed: $(cat "$log")"
+expect_log "it stays until 'nixheal clear hello --host b'"
+"$nixheal" status --config "$config" >"$work/stdout" 2>"$log" || fail "status failed"
+grep -qE '^TARGET +PIN +REASON +SINCE$' "$work/stdout" || fail "status has no header: $(cat "$work/stdout")"
+grep -qE '^host b +toypkgs.hello +pinned by hand +' "$work/stdout" || fail "status lacks the manual pin: $(cat "$work/stdout")"
+if "$nixheal" why hello --config "$config" 2>"$log"; then fail "why hello on a succeeded"; fi
+expect_log "hello is not pinned on host a; it is pinned on host b (pass --host b)"
+if "$nixheal" clear --held hello --config "$config" 2>"$log"; then fail "clear --held with an attr was accepted"; fi
+"$nixheal" clear hello --host b --config "$config" 2>"$log" || fail "clearing hello on b failed"
+expect_log "pins it again if it still fails"
+mkdir -p "$work/nopins"
+"$nixheal" status --flake "$work/nopins" --config "$config" >"$work/stdout" 2>"$log" || fail "status in a directory without pins.json failed"
+grep -qF "no pins.json in $work/nopins" "$work/stdout" || fail "status did not say pins.json is missing: $(cat "$work/stdout")"
+if "$nixheal" status --config "$work/nonexistent.json" 2>"$log"; then fail "a missing --config was ignored"; fi
+expect_log "reading $work/nonexistent.json"
+if "$nixheal" pin hello --flake "$work/nopins" --config "$config" 2>"$log"; then fail "pin in a directory without flake.lock succeeded"; fi
+expect_log "no flake.lock in $work/nopins"
+git -C "$sys" checkout -q -- pins.json
 
 step "a flake in a subdirectory of its repository"
 repo2="$work/repo2"

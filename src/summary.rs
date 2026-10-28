@@ -7,6 +7,8 @@ struct Item {
     what: String,
     kind: &'static str,
     days: Option<i64>,
+    /// Structured fields for scripts, next to the display strings.
+    fields: Value,
 }
 
 /// How a target is named in a summary: hosts by name, homes as "home NAME", so
@@ -35,14 +37,27 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
                 what: format!("{} held", label(&target)),
                 kind: "held",
                 days: date::parse(&h.since).map(|d| today - d),
+                fields: json!({
+                    "target": name,
+                    "target_kind": kind.noun(),
+                    "since": h.since,
+                    "held_reason": h.reason,
+                }),
             });
         }
-        for (_, attr, pin) in entry.iter() {
+        for (input, attr, pin) in entry.iter() {
             pins += 1;
             items.push(Item {
                 what: format!("{}: {attr}", label(&target)),
                 kind: pin.reason.as_str(),
                 days: date::parse(&pin.since).map(|d| today - d),
+                fields: json!({
+                    "target": name,
+                    "target_kind": kind.noun(),
+                    "input": input,
+                    "attr": attr,
+                    "since": pin.since,
+                }),
             });
         }
     }
@@ -85,13 +100,17 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
                 if is_stale(i) {
                     label.push_str(", STALE");
                 }
-                json!({
+                let mut row = json!({
                     "name": i.what,
                     "label": label,
                     "kind": i.kind,
                     "days": i.days,
                     "stale": is_stale(i),
-                })
+                });
+                if let (Some(row), Some(fields)) = (row.as_object_mut(), i.fields.as_object()) {
+                    row.extend(fields.clone());
+                }
+                row
             })
             .collect()
     };
@@ -186,6 +205,11 @@ mod tests {
         assert_eq!(s["items"][0]["name"], "home alice: zed-editor");
         assert_eq!(s["items"][1]["name"], "pi held");
         assert_eq!(s["items"][1]["label"], "2d, held");
+        assert_eq!(s["items"][1]["held_reason"], "linux fails");
+        assert_eq!(s["items"][0]["target"], "alice");
+        assert_eq!(s["items"][0]["target_kind"], "home");
+        assert_eq!(s["items"][0]["input"], "nixpkgs");
+        assert_eq!(s["items"][0]["attr"], "zed-editor");
     }
 
     #[test]

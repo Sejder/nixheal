@@ -306,6 +306,8 @@
             assert settings.input == "nixpkgs";
             assert upgrade.environment.NIXHEAL_CONFIG == "/etc/nixheal.json";
             assert upgrade.unitConfig.OnFailure == [ ];
+            assert upgrade.unitConfig.X-StopOnRemoval == false;
+            assert upgrade.restartIfChanged == false;
             assert builtins.any (p: (p.pname or "") == "nh") machine.config.environment.systemPackages;
             assert probe.enable && probe.name == "test";
             assert nixpkgs.lib.hasSuffix "-pins.json" (toString probe.pinsFile);
@@ -341,6 +343,7 @@
             assert home.config.programs.nixheal.packageSets ? nixpkgs;
             assert builtins.match ".*nixheal switch --update" homeUpgrade.Service.ExecStart != null;
             assert !(homeUpgrade.Unit ? After);
+            assert homeUpgrade.Unit.X-SwitchMethod == "keep-old";
             assert home.config.systemd.user.timers.nixheal-upgrade.Timer.OnCalendar == "04:40";
             assert builtins.elem home.config.programs.nixheal.package home.config.home.packages;
             assert home.config.programs.nixheal.packageSets.extra ? hello;
