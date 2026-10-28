@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.2
 
-Fixes from the second to fifth independent reviews of 0.1.1.
+Fixes from four more independent reviews of 0.1.1 and three reviews of its
+command line.
 
 Breaking: nixheal no longer commits by default. `build`, `switch` and `boot`
 leave `flake.lock` and `pins.json` changed in the checkout unless given
