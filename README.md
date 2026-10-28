@@ -178,8 +178,9 @@ the last lock any target of the flake built with, then the current
 **Retry.** Each pin records the input revision it was last tried at. When that
 input moves, the pin (with the package's pins in other sets from the same
 failure) is dropped for the next build; if the package builds, the pin is
-gone, otherwise it comes back with its original date. Manual pins
-(`nixheal pin`) are never retried.
+gone, otherwise it comes back with its original date. `nixheal clear` on such
+a pin asks for the same retry without waiting for the input to move. Manual
+pins (`nixheal pin`) are never retried.
 
 ## Commands
 
@@ -192,8 +193,9 @@ The verbs follow `nh` and `nixos-rebuild`:
 | `nixheal boot [--update [INPUT...]]` | the same, then make this machine boot into it |
 | `nixheal status [--json]` | pinned packages and held hosts with their age |
 | `nixheal why <attr>` | the failed derivation (or the evaluation error), the path up to the pinned package, the end of the build log |
-| `nixheal pin <attr> [--input I]` | pin by hand at the current lock (in `programs.nixheal.input` by default); kept until cleared |
-| `nixheal clear <attr> [--input I]` (or `unpin`) | remove a pin; the next run builds the package from the current lock and pins it again if it still fails |
+| `nixheal pin <attr> [--input I] [--old-lock FILE]` | pin by hand (in `programs.nixheal.input` by default), at the current lock or at the input's revision in `FILE`, e.g. a `flake.lock` from git history for a package that builds but misbehaves; kept until cleared |
+| `nixheal clear <attr> [--input I]` (or `unpin`) | remove a pin made by hand; for a pin nixheal made, have the next run retry it: the pin goes if the package builds, and stays at its revision if it still fails |
+| `nixheal clear <attr> --drop` | remove a pin nixheal made outright. If the package still fails, a run can only pin it again once its package set moves; until then the host is held (this machine's own run gives up) |
 | `nixheal clear --held` | release a held host or home: drop its held lock, so machines that skip held entries update again, and the next run builds it with the current lock |
 | `nixheal merge <file>` | fold another `pins.json` in; per host or home, the entry from the newer lock wins, keeping pins made by hand here |
 
@@ -203,8 +205,10 @@ entry). `pin`, `clear` and `merge` only change `pins.json`; the next `build`,
 `switch` or `boot` applies it, and commits it with `--commit` or
 `programs.nixheal.commit`.
 
-`--config FILE`, `--flake DIR`, `-q` and `-v` (`--verbose`, which overrides
-`programs.nixheal.quiet`) work before or after the command.
+`--config FILE`, `--flake DIR`, `-q` and `-v` work before or after the
+command. `-q` (`--quiet`) prints only pins, unpins, holds, warnings, errors and
+files left uncommitted; nix's own messages are shown only when nixheal could
+not handle them. `-v` (`--verbose`) overrides `programs.nixheal.quiet`.
 Every command but `status` and `why` says first which flake and config it
 acts on, since by default both come from `/etc/nixheal.json` or
 `~/.config/nixheal.json`, wherever you run it. A `--config` (or
@@ -219,7 +223,7 @@ Options of `build`, `switch` and `boot`:
 | `--dry-run` | evaluate and build as usual and show what would be pinned and unpinned (marked `(dry run)`), then leave every file as it was |
 | `--commit` | commit `flake.lock` and `pins.json` after the run (the default with `programs.nixheal.commit = true`) |
 | `--no-commit` | leave them uncommitted, whatever `programs.nixheal.commit` says (the default otherwise) |
-| `--only NAME` | build only some of the configured hosts and homes; repeatable or comma-separated |
+| `--only NAME` | build only some of the configured hosts and homes; repeatable or comma-separated, and `host:NAME` or `home:NAME` where a host and a home share a name |
 | `--hold-local` | hold this machine's own host like any other instead of giving up; for a machine that builds a fleet |
 | `--gc-roots DIR` | keep every system that built alive under `DIR/nixheal-host-<host>` and `DIR/nixheal-home-<name>`, e.g. for a binary cache; without `--only`, the roots this flake's runs made for targets no longer configured are removed (they are listed in a hidden file there), and nothing else in `DIR` is touched |
 | `--fail-on-hold` | exit with 3 when a host or home is held |
@@ -228,7 +232,6 @@ Options of `build`, `switch` and `boot`:
 | `--max-rounds N` | give up after N build rounds (8) |
 | `--max-new-pins N` | hold a host, or give up on this machine's own, rather than pin more than N new packages for it in one run (10) |
 | `--system SYSTEM` | the system for eval checks when a target's own cannot be evaluated |
-| `-q`, `--quiet` | print only pins, unpins, holds, warnings and errors; nix's error messages are shown only when nixheal could not handle them |
 
 nixheal works in a dirty tree. When it commits, it commits only `flake.lock`
 and `pins.json`, without running git hooks or signing. A run takes a lock on the
@@ -370,12 +373,12 @@ The text `nixheal status`:
 
 ```
 flake /home/alice/nixos
-TARGET       PACKAGE (SETS)                         REASON           SINCE
+TARGET       PACKAGE (SETS)                          REASON           SINCE
 host laptop  open-webui (nixpkgs, nixpkgs-unstable)  failed to build  2026-10-20 (8d)
 host server  -                                       whole host held  2026-10-01 (27d) STALE
     nixpkgs.linux fails and is on the never-pin list (...)
 1 pinned package(s), 1 held, 1 stale (older than 14 days).
-'nixheal why ATTR' explains a pin, 'nixheal clear ATTR' removes one, 'nixheal clear --held --host NAME' releases a hold.
+'nixheal why ATTR' explains a pin, 'nixheal clear ATTR' retries or removes one, 'nixheal clear --held --host NAME' (or --home) releases a hold.
 ```
 
 ## Limitations
@@ -431,7 +434,12 @@ host server  -                                       whole host held  2026-10-01
 `locked` is the flake.lock node of the nixpkgs the package is taken from, so
 the overlay fetches it purely. A run replaces the entries of the targets it
 built and leaves the others alone. `nixheal merge` combines two files: per
-target, the entry computed from the newer lock wins.
+target, the entry from the newer lock wins (a held entry counts the lock it was
+tried against, `checkedLastModified`), and pins made by hand here are kept.
+
+`pins.json` is code, like `flake.lock`: every `locked` node in it is fetched
+and imported when your systems evaluate. Only merge files from a build host
+you trust, and review changes to it like any other change to the flake.
 
 ## Development
 

@@ -22,7 +22,7 @@ let
       inherit input nixpkgsConfig;
     };
 
-  platformArgs = import ./platform.nix pkgs.stdenv.buildPlatform pkgs.stdenv.hostPlatform;
+  platformArgs = import ./platform.nix lib pkgs.stdenv.buildPlatform pkgs.stdenv.hostPlatform;
 
   extraSets = lib.mapAttrs (
     input: set:
@@ -63,6 +63,14 @@ in
   };
 
   config = lib.mkMerge [
+    (lib.mkIf (cfg.autoUpgrade.enable && !cfg.enable) {
+      assertions = [
+        {
+          assertion = false;
+          message = "programs.nixheal.autoUpgrade needs programs.nixheal.enable";
+        }
+      ];
+    })
     {
       programs.nixheal.packageSets = {
         ${cfg.input} = pkgs;

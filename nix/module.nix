@@ -19,7 +19,7 @@ let
       inherit input nixpkgsConfig;
     };
 
-  platformArgs = import ./platform.nix pkgs.stdenv.buildPlatform pkgs.stdenv.hostPlatform;
+  platformArgs = import ./platform.nix lib pkgs.stdenv.buildPlatform pkgs.stdenv.hostPlatform;
 
   extraSets = lib.mapAttrs (
     input: set:
@@ -43,6 +43,7 @@ let
   ];
 
   up = cfg.autoUpgrade;
+  readOnlyPkgs = !(options.nixpkgs ? localSystem);
   upCommit = if up.commit == null then cfg.commit else up.commit;
   builtLink = "/run/nixheal/system";
   activateScript = pkgs.writeShellScript "nixheal-activate" ''
@@ -97,6 +98,14 @@ in
       };
 
   config = lib.mkMerge [
+    (lib.mkIf (up.enable && !cfg.enable) {
+      assertions = [
+        {
+          assertion = false;
+          message = "programs.nixheal.autoUpgrade needs programs.nixheal.enable";
+        }
+      ];
+    })
     {
       programs.nixheal.packageSets = {
         ${cfg.input} = pkgs;
@@ -128,10 +137,10 @@ in
           message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
         }) cfg.nixpkgs;
         warnings =
-          lib.optional (!(options.nixpkgs ? overlays))
+          lib.optional (readOnlyPkgs)
             "programs.nixheal cannot add its overlay to a read-only nixpkgs (nixosModules.readOnlyPkgs); add nixheal.lib.mkOverlay to the pkgs you pass in, or its pins do not apply";
       }
-      // lib.optionalAttrs (options.nixpkgs ? overlays) {
+      // lib.optionalAttrs (!readOnlyPkgs) {
         nixpkgs.overlays = lib.mkAfter [
           (overlay cfg.input (if options.nixpkgs.pkgs.isDefined then null else config.nixpkgs.config))
         ];

@@ -14,28 +14,41 @@ pub struct Restore {
     pub pins_path: PathBuf,
     /// None when this run created pins.json.
     pub pins: Option<Vec<u8>>,
+    /// The run added pins.json to the git index, which it was not in.
+    pub untrack: bool,
     pub flake: PathBuf,
 }
 
 impl Restore {
-    pub fn apply(&self) -> Result<()> {
-        write_atomic(&self.lock_path, &self.lock)?;
-        match &self.pins {
-            Some(bytes) => write_atomic(&self.pins_path, bytes),
-            None => {
-                match std::fs::remove_file(&self.pins_path) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        return Err(e)
-                            .with_context(|| format!("removing {}", self.pins_path.display()));
-                    }
-                    _ => {}
-                }
-                if let Some(git) = Git::open(&self.flake) {
-                    git.forget(&self.pins_path)?;
-                }
-                Ok(())
-            }
+    /// Put the files back; returns whether anything had changed.
+    pub fn apply(&self) -> Result<bool> {
+        let mut changed = false;
+        if std::fs::read(&self.lock_path).ok().as_deref() != Some(self.lock.as_slice()) {
+            write_atomic(&self.lock_path, &self.lock)?;
+            changed = true;
         }
+        match &self.pins {
+            Some(bytes) => {
+                if std::fs::read(&self.pins_path).ok().as_deref() != Some(bytes.as_slice()) {
+                    write_atomic(&self.pins_path, bytes)?;
+                    changed = true;
+                }
+            }
+            None => match std::fs::remove_file(&self.pins_path) {
+                Ok(()) => changed = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("removing {}", self.pins_path.display()));
+                }
+            },
+        }
+        if (self.pins.is_none() || self.untrack)
+            && let Some(git) = Git::open(&self.flake)
+        {
+            git.forget(&self.pins_path)?;
+        }
+        Ok(changed)
     }
 }
 
@@ -82,7 +95,7 @@ pub fn arm(restore: Restore) {
             let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(r) = armed.take() {
                 match r.apply() {
-                    Ok(()) => log::change("interrupted; restored flake.lock and pins.json"),
+                    Ok(_) => log::change("interrupted; restored flake.lock and pins.json"),
                     Err(e) => log::warn(&format!("interrupted; restoring failed: {e:#}")),
                 }
             }
@@ -113,13 +126,16 @@ pub fn settle<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     result
 }
 
-/// Put the files back now, and stop guarding them.
+/// Put the files back now, and stop guarding them. Says so when anything
+/// had changed.
 pub fn restore() -> Result<()> {
     let taken = ARMED.lock().ok().and_then(|mut a| a.take());
-    match taken {
-        Some(r) => r.apply(),
-        None => Ok(()),
+    if let Some(r) = taken
+        && r.apply()?
+    {
+        log::change("restored flake.lock and pins.json");
     }
+    Ok(())
 }
 
 /// An exclusive lock on the flake for the length of a run, in its git

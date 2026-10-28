@@ -137,14 +137,32 @@ impl Nix {
         format!("{}#{}", self.flake, attr)
     }
 
+    /// Update the lock. Under --quiet its list of updated inputs is kept back
+    /// unless the update fails.
     pub fn flake_update(&self, inputs: &[String]) -> Result<()> {
-        let status = command()
+        let quiet = log::is_quiet();
+        let mut child = command()
             .args(["flake", "update", "--flake", &self.flake])
             .args(inputs)
             .stdin(Stdio::null())
-            .status()
+            .stderr(if quiet {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .spawn()
             .context("spawning nix flake update")?;
-        if !status.success() {
+        crate::guard::track(child.id());
+        let mut stderr = Vec::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_end(&mut stderr);
+        }
+        let status = child.wait().context("waiting for nix flake update");
+        crate::guard::untrack(child.id());
+        if !status?.success() {
+            if quiet {
+                eprint!("{}", String::from_utf8_lossy(&stderr));
+            }
             bail!("nix flake update failed");
         }
         Ok(())

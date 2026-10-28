@@ -26,7 +26,7 @@ let
         {
           config = importConfig;
         }
-        // import ./platform.nix prev.stdenv.buildPlatform prev.stdenv.hostPlatform
+        // import ./platform.nix (prev.lib or null) prev.stdenv.buildPlatform prev.stdenv.hostPlatform
       );
     }) (builtins.attrValues set)
   );

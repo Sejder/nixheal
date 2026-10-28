@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Fixes from the second, third and fourth independent reviews of 0.1.1.
+Fixes from the second to fifth independent reviews of 0.1.1.
 
 Breaking: nixheal no longer commits by default. `build`, `switch` and `boot`
 leave `flake.lock` and `pins.json` changed in the checkout unless given
@@ -100,7 +100,7 @@ Command line:
   them, and without it handled errors are followed by a line saying so.
 - `status` prints an aligned table with a header and a summary, names the
   flake, and says when there is no `pins.json`. `status --json` rows carry
-  `target`, `target_kind`, `input`, `attr`, `since` and `held_reason`.
+  `target`, `target_kind`, `inputs`, `attr`, `since` and `held_reason`.
 - `why` says where else a package is pinned and how to clear it.
 - Error messages name where a path came from, cut nix's errors to the line
   that says what failed, and avoid store paths where a name will do.
@@ -116,9 +116,8 @@ Package sets:
   `status`, `why`, `status --json` and the logs show it once, with its sets.
 - An evaluation failure is pinned in every set that lost the attribute, not
   only the first.
-- Pinned packages and extra package sets are imported with the full build and
-  host platforms, so `pkgsStatic`, `pkgsMusl`, cross builds and custom
-  platform settings keep them.
+- Pinned packages and extra package sets are imported for the right build
+  and host platforms, so `pkgsStatic` and cross builds keep them.
 
 Runs:
 
@@ -152,6 +151,47 @@ More command line:
   JSON format is documented.
 - `status --json` names targets `host NAME` and `home NAME`, `pins` counts
   packages, and rows carry `inputs`.
+
+Fifth review:
+
+- `nixheal clear` on a pin nixheal made no longer throws the old revision
+  away: the next run retries the package, dropping the pin if it builds and
+  keeping it at its revision if it still fails. `--drop` removes it outright,
+  and says what that means. `nixheal pin --old-lock FILE` pins at the input's
+  revision in another `flake.lock`.
+- The read-only nixpkgs check works (`readOnlyPkgs` declares
+  `nixpkgs.overlays` itself), with a flake check.
+- Pinned packages keep musl, `gcc.arch`, LLVM and other plain platform
+  settings: a platform that is not the default for its system is passed as
+  its triple plus the settings that differ, never as an elaborated platform,
+  which an older nixpkgs cannot take. Checks cover glibc, musl, static, LLVM,
+  a tuned `gcc.arch` and a cross build.
+- `--gc-roots` keeps a held host's root on its list, so it is pruned once the
+  host is no longer configured.
+- Every error after a run starts restores `flake.lock` and `pins.json`
+  (including a missing `--old-lock` on a fresh checkout), the error comes
+  first and the restore is reported only when something changed, and a dry
+  run or failed run takes a `pins.json` it added out of the git index.
+- `nix flake update` is stopped with nixheal, and its output is held back
+  under `--quiet` unless it fails.
+- A hold that `merge` sees is ranked by the lock it was tried against
+  (`checkedLastModified`), so a newer hold is not lost.
+- A system that embeds `pins.json` by itself is built again with the final
+  file too.
+- Once this machine's own host fails, the run stops instead of building the
+  others for nothing.
+- `autoUpgrade` without `enable` is an error; `--dry-run` honours
+  `--fail-on-hold`; `--only host:NAME` and `home:NAME` tell a host and a home
+  apart.
+- Messages: the hint for a package pinned on this machine's own entry, the
+  "not pinning" reasons, a closing line that says "nothing pinned or
+  unpinned" and "uncommitted changes" (shown under `--quiet` too), `why` on a
+  held host, `clear --input` with the wrong set, pins dropped when their host
+  is held, "held" for homes, hints that do not repeat the flag you passed,
+  one `attr (sets)` form, a warning when `switch` activates nothing, exit
+  codes in `--help`, real plurals, and "today".
+- The README says that `pins.json` is code to review and only merge from a
+  trusted build host.
 
 ## 0.1.1
 

@@ -69,7 +69,11 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
     } else {
         "OK"
     };
-    let age = |i: &Item| i.days.map_or("?".to_string(), |d| format!("{d}d"));
+    let age = |i: &Item| match i.days {
+        Some(0) => "today".to_string(),
+        Some(d) => format!("{d}d"),
+        None => "?".to_string(),
+    };
     let oldest = items.first();
     let list = if items.is_empty() {
         "nothing pinned".to_string()

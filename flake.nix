@@ -89,6 +89,12 @@
             hello = "new";
             cowsay = "new";
           };
+          tuned = import nixpkgs {
+            localSystem = {
+              inherit system;
+              gcc.arch = if system == "x86_64-linux" then "x86-64-v3" else "armv8.2-a";
+            };
+          };
           onReal =
             p:
             self.lib.mkOverlay {
@@ -107,6 +113,26 @@
               // args
             ) prev prev;
 
+          readOnly = nixpkgs.lib.nixosSystem {
+            modules = [
+              nixpkgs.nixosModules.readOnlyPkgs
+              self.nixosModules.default
+              {
+                nixpkgs.pkgs = pkgs;
+                networking.hostName = "test";
+                programs.nixheal = {
+                  enable = true;
+                  pinsFile = pins;
+                };
+                boot.loader.grub.enable = false;
+                fileSystems."/" = {
+                  device = "none";
+                  fsType = "tmpfs";
+                };
+                system.stateVersion = nixpkgs.lib.trivial.release;
+              }
+            ];
+          };
           machine = nixpkgs.lib.nixosSystem {
             inherit system;
             modules = [
@@ -298,6 +324,9 @@
             assert (onReal pkgs.pkgsStatic).hello.drvPath == pkgs.pkgsStatic.hello.drvPath;
             assert
               (onReal pkgs.pkgsCross.riscv64).hello.drvPath == pkgs.pkgsCross.riscv64.hello.drvPath;
+            assert (onReal pkgs.pkgsMusl).hello.drvPath == pkgs.pkgsMusl.hello.drvPath;
+            assert (onReal pkgs.pkgsLLVM).hello.drvPath == pkgs.pkgsLLVM.hello.drvPath;
+            assert (onReal tuned).hello.drvPath == tuned.hello.drvPath;
             pkgs.runCommand "nixheal-overlay-check" { } "touch $out";
           module =
             assert machine.pkgs.hello.pname == "hello";
@@ -320,6 +349,8 @@
             assert upgrade.unitConfig.OnFailure == [ ];
             assert upgrade.unitConfig.X-StopOnRemoval == false;
             assert upgrade.serviceConfig.TimeoutStartSec == "12h";
+            assert builtins.any (nixpkgs.lib.hasInfix "read-only nixpkgs") readOnly.config.warnings;
+            assert readOnly.config.system.build.toplevel.drvPath != "";
             assert upgrade.restartIfChanged == false;
             assert builtins.any (p: (p.pname or "") == "nh") machine.config.environment.systemPackages;
             assert probe.enable && probe.name == "test";

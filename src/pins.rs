@@ -83,13 +83,26 @@ pub struct Entry {
     pub lock_sha256: String,
     #[serde(default)]
     pub lock_last_modified: i64,
+    /// The newest lock this entry was tried against: the same as the lock it
+    /// was computed from, except for a held entry. Merge ranks entries by it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub checked_last_modified: i64,
     #[serde(default)]
     pub pins: BTreeMap<String, BTreeMap<String, Pin>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Held>,
 }
 
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 impl Entry {
+    /// How recent the newest lock this entry reflects is.
+    pub fn recency(&self) -> i64 {
+        self.lock_last_modified.max(self.checked_last_modified)
+    }
+
     pub fn get(&self, input: &str, attr: &str) -> Option<&Pin> {
         self.pins.get(input)?.get(attr)
     }
@@ -237,7 +250,7 @@ impl PinsFile {
     pub fn merge(&mut self, kind: Kind, name: &str, mut entry: Entry) -> bool {
         let section = self.section_mut(kind);
         if let Some(existing) = section.get(name) {
-            if existing.lock_last_modified > entry.lock_last_modified {
+            if existing.recency() > entry.recency() {
                 return false;
             }
             for (input, attr, pin) in existing.iter() {

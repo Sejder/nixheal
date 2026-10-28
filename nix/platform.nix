@@ -1,17 +1,27 @@
-build: host:
+lib: build: host:
 let
-  key = p: {
+  plain = p: {
     config = p.config or p.system;
-    static = p.isStatic or false;
+    gcc = p.gcc or { };
+    useLLVM = p.useLLVM or false;
+    linker = p.linker or "bfd";
+    isStatic = p.isStatic or false;
   };
+  elaborate = args: if lib == null then args else lib.systems.elaborate args;
+  differing =
+    p:
+    let
+      mine = plain p;
+      usual = plain (elaborate { config = mine.config; });
+    in
+    builtins.removeAttrs mine (builtins.filter (n: mine.${n} == usual.${n}) (builtins.attrNames mine));
+  portable = p: { config = (plain p).config; } // differing p;
+  usualFor = p: lib == null || !(p ? config) || plain p == plain (elaborate { inherit (p) system; });
 in
-if key build == key host then
-  { inherit (host) system; }
+if plain build == plain host then
+  if usualFor host then { inherit (host) system; } else { localSystem = portable host; }
 else
   {
-    localSystem = { inherit (build) system; };
-    crossSystem = {
-      config = host.config;
-    }
-    // (if host.isStatic or false then { isStatic = true; } else { });
+    localSystem = if usualFor build then { inherit (build) system; } else portable build;
+    crossSystem = portable host;
   }

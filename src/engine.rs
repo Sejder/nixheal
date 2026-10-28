@@ -118,7 +118,12 @@ impl Engine {
             let active: Vec<usize> = (0..states.len())
                 .filter(|&i| states[i].status == Status::Active)
                 .collect();
-            if active.is_empty() {
+            // Once this machine's own target failed, the run gives up whatever
+            // the others do: building them further would be thrown away.
+            let given_up = states.iter().any(|st| {
+                matches!(st.status, Status::Failed(_)) && Some(&st.target) == self.guarded.as_ref()
+            });
+            if active.is_empty() || given_up {
                 break;
             }
             let written = self.write(&original, &states)?;
@@ -131,8 +136,13 @@ impl Engine {
                 .map(|&i| states[i].entry.packages().len())
                 .sum();
             log::info(&format!(
-                "round {round}: evaluating and building {} with {pins} pinned package(s)",
-                names.join(", ")
+                "round {round}: evaluating and building {}{}",
+                names.join(", "),
+                if pins == 0 {
+                    String::new()
+                } else {
+                    format!(" with {}", plural(pins, "pinned package"))
+                }
             ));
             let started = std::time::Instant::now();
             let new_before: usize = active.iter().map(|&i| states[i].new_pins).sum();
@@ -155,8 +165,8 @@ impl Engine {
                 log::discard_nix_errors();
                 if new_after > new_before {
                     log::info(&format!(
-                        "the errors above were handled: pinned {} package(s), building again",
-                        new_after - new_before
+                        "the errors above were handled: pinned {}, building again",
+                        plural(new_after - new_before, "package")
                     ));
                 }
             }
@@ -245,8 +255,16 @@ impl Engine {
             if group.is_empty() {
                 continue;
             }
+            let why = if entry
+                .get(&input, &attr)
+                .is_some_and(|p| p.checked_nar_hash.is_empty())
+            {
+                "nixheal clear asked for a retry".to_string()
+            } else {
+                format!("{input} moved since it was pinned")
+            };
             log::info(&format!(
-                "retrying {target}: {attr} ({}): {input} moved since it was pinned",
+                "retrying {target}: {attr} ({}): {why}",
                 group.join(", ")
             ));
             for i in group {
@@ -257,6 +275,7 @@ impl Engine {
         }
         entry.lock_sha256 = self.new_lock.sha256();
         entry.lock_last_modified = self.new_lock.last_modified();
+        entry.checked_last_modified = self.new_lock.last_modified();
 
         let (inputs, status) = match self.probe(target)? {
             Ok(sets) => (sets, Status::Active),
@@ -740,11 +759,13 @@ impl Engine {
             let mut added: Vec<(String, String, Pin)> = Vec::new();
             for (input, attr) in &w.members {
                 if st.entry.get(input, attr).is_some() {
-                    skipped.push(format!("{input}.{attr} is pinned and still fails"));
+                    skipped.push(format!(
+                        "{attr} in {input}: it is already pinned there and still fails"
+                    ));
                     continue;
                 }
                 let Some(checked) = self.new_lock.nar_hash(input) else {
-                    skipped.push(format!("{input} is not an input of the new lock"));
+                    skipped.push(format!("{attr} in {input}: {input} is not in the new lock"));
                     continue;
                 };
                 if let Some(mut pin) = st.retrying.remove(&(input.clone(), attr.clone())) {
@@ -755,12 +776,14 @@ impl Engine {
                 }
                 let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
                 let Some(locked) = old_lock.locked(input) else {
-                    skipped.push(format!("{input} is not in the last good lock"));
+                    skipped.push(format!(
+                        "{attr} in {input}: {input} is not in the last good lock"
+                    ));
                     continue;
                 };
                 if locked["narHash"].as_str() == Some(checked.as_str()) {
                     skipped.push(format!(
-                        "{input}.{attr} fails at the last good {input} too, so pinning cannot help"
+                        "{attr} in {input}: {input} has not moved since the last good lock, so a pin there would change nothing"
                     ));
                     continue;
                 }
@@ -895,13 +918,34 @@ impl Engine {
                     if Some(&target) == self.local.as_ref() {
                         report.local_held = true;
                     }
+                    let dropped = st
+                        .entry
+                        .packages()
+                        .keys()
+                        .filter(|a| {
+                            st.base
+                                .as_ref()
+                                .is_none_or(|b| b.inputs_pinning(a).is_empty())
+                        })
+                        .count();
                     let mut entry = st.base.unwrap_or_default();
                     // A held entry is computed from the lock it is held on,
-                    // which is what consumers and merge compare.
+                    // which is what consumers compare; merge ranks it by the
+                    // lock it was tried against.
                     if st.held_before.is_none() {
                         entry.lock_sha256 = st.old_lock.sha256();
                         entry.lock_last_modified = st.old_lock.last_modified();
                     }
+                    entry.checked_last_modified = self.new_lock.last_modified();
+                    let dropped = if dropped == 0 {
+                        String::new()
+                    } else {
+                        format!(
+                            " (the {} pinned for it in this run {} dropped)",
+                            plural(dropped, "package"),
+                            if dropped == 1 { "was" } else { "were" }
+                        )
+                    };
                     let release = format!(
                         "nixheal clear --held --{} {}",
                         match target.kind {
@@ -914,7 +958,7 @@ impl Engine {
                     let held = match st.held_before {
                         Some(mut h) => {
                             log::change(&format!(
-                                "still holding {target} on its last good lock (since {}): {reason}",
+                                "still holding {target} on its last good lock (since {}): {reason}{dropped}",
                                 h.since
                             ));
                             h.reason = reason.clone();
@@ -923,7 +967,7 @@ impl Engine {
                         None => {
                             report.changes.push(format!("held {target}: {reason}"));
                             log::change(&format!(
-                                "held {target} on its last good lock: {reason}. It is retried on every run; release it by hand with '{release}'"
+                                "held {target} on its last good lock: {reason}{dropped}. It is retried on every run; release it by hand with '{release}'"
                             ));
                             Held {
                                 since: date::format(self.today),
@@ -974,7 +1018,7 @@ impl Engine {
                     .show_drvs(std::slice::from_ref(drv))?
                     .nodes
                     .values()
-                    .any(|n| n.srcs.iter().any(|p| p == src)),
+                    .any(|n| n.srcs.iter().any(|p| p == src || p.ends_with("-pins.json"))),
                 None => true,
             };
             if embeds {
@@ -1008,8 +1052,8 @@ impl Engine {
         }
         if !rebuild.is_empty() {
             log::info(&format!(
-                "building {} system(s) again with the final pins.json",
-                rebuild.len()
+                "building {} again with the final pins.json",
+                plural(rebuild.len(), "system")
             ));
             let outcome = self.nix.build_drvs(&rebuild, &mut monitor)?;
             if !outcome.success {
@@ -1027,8 +1071,13 @@ impl Engine {
         match date::parse(&pin.since).map(|d| self.today - d) {
             Some(days) if days > self.warn_after_days && pin.reason != Reason::Manual => {
                 log::warn(&format!(
-                    "{target}: {attr} has been pinned for {days} days (warn after {}); see nixheal why {attr}",
-                    self.warn_after_days
+                    "{target}: {attr} has been pinned for {days} days (warn after {}); see nixheal why {attr}{}",
+                    self.warn_after_days,
+                    if Some(target) == self.local.as_ref() {
+                        String::new()
+                    } else {
+                        format!(" --{} {}", target.kind.noun(), target.name)
+                    }
                 ))
             }
             Some(_) => {}
@@ -1066,6 +1115,15 @@ fn flake_relative(path: &str) -> Option<String> {
     })?;
     let rel = parts[object + 1..].join("/");
     (!rel.is_empty()).then_some(rel)
+}
+
+/// "1 package", "2 packages".
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// A locked input as a revision and the day it is from, e.g.
