@@ -142,6 +142,7 @@ mod tests {
             failed_drv: None,
             trail: Vec::new(),
             error: None,
+            overlays: None,
             checked_nar_hash: String::new(),
         }
     }

@@ -13,9 +13,10 @@ let
   globalPkgs = inNixos && (osConfig.home-manager.useGlobalPkgs or false);
   nhFlake = config.programs.nh.flake or null;
 
+  marked = import ./marked.nix;
   overlay =
     input: nixpkgsConfig:
-    self.lib.mkOverlay {
+    marked.wrap self.lib.mkOverlay cfg.pinnedOverlays {
       pins = cfg.pinsFile;
       kind = if inNixos then "hosts" else "homes";
       inherit (cfg) name;
@@ -72,6 +73,17 @@ in
       ];
     })
     {
+      programs.nixheal.importPinned =
+        { locked, overlays }:
+        import ./import-pinned.nix {
+          config =
+            if (config.nixpkgs.config or null) == null then pkgs.config else config.nixpkgs.config;
+          inherit lib;
+          inherit (pkgs.stdenv) buildPlatform hostPlatform;
+        } {
+          inherit locked;
+          overlays = if overlays then marked.before (pkgs.overlays or [ ]) else [ ];
+        };
       programs.nixheal.packageSets = {
         ${cfg.input} = pkgs;
       }

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+Pinned packages keep your overlays:
+
+- A pinned package was imported from the old nixpkgs without your overlays,
+  so a patch or override of yours silently disappeared while it was pinned.
+  It now gets the overlays ordered before nixheal's own (those after it still
+  apply on top, once), so the pinned copy is the one your last good system
+  ran.
+- When a pin is made, nixheal evaluates the package with and without your
+  overlays; if they do not evaluate against the old nixpkgs, the pin is made
+  without them and a warning says why. Each pin records the choice
+  (`"overlays"` in `pins.json`); existing pins keep getting none.
+- New `programs.nixheal.pinnedOverlays` (default `true`); with `false`, a
+  warning says when leaving your overlays out changes a pinned package.
+- `lib.mkOverlay` takes `overlays`, applied to pins that ask for them.
+
+
 Fixes from a sixth review and a fourth review of the command line:
 
 - Standalone Home Manager no longer fails to evaluate once something is

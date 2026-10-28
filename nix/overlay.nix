@@ -4,6 +4,7 @@
   name,
   input,
   nixpkgsConfig ? null,
+  overlays ? [ ],
 }:
 final: prev:
 let
@@ -11,22 +12,22 @@ let
   entry = (data.${kind} or { }).${name} or { };
   set = (entry.pins or { }).${input} or { };
 
-  given = if nixpkgsConfig != null then nixpkgsConfig else prev.config;
-  importConfig = builtins.removeAttrs given (
-    builtins.filter (n: given.${n} == null) (builtins.attrNames given)
-  );
+  importPinned = import ./import-pinned.nix {
+    config = if nixpkgsConfig != null then nixpkgsConfig else prev.config;
+    lib = prev.lib or null;
+    inherit (prev.stdenv) buildPlatform hostPlatform;
+  };
+  carried = pin: pin.overlays or false;
+  key = pin: "${pin.locked.narHash}${if carried pin then "+overlays" else ""}";
 
   sources = builtins.listToAttrs (
     map (pin: {
-      name = pin.locked.narHash;
-      value = import (builtins.fetchTree pin.locked) (
-        {
-          config = importConfig;
-          overlays = [ ];
-        }
-        // import ./platform.nix (prev.lib or null) prev.stdenv.buildPlatform prev.stdenv.hostPlatform
-      );
+      name = key pin;
+      value = importPinned {
+        inherit (pin) locked;
+        overlays = if carried pin then overlays else [ ];
+      };
     }) (builtins.attrValues set)
   );
 in
-builtins.mapAttrs (attr: pin: sources.${pin.locked.narHash}.${attr}) set
+builtins.mapAttrs (attr: pin: sources.${key pin}.${attr}) set

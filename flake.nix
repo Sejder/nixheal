@@ -79,6 +79,9 @@
             builtins.toJSON {
               version = 2;
               hosts.test.pins.nixpkgs.hello = pin;
+              hosts.test.pins.nixpkgs.figlet = pin // {
+                overlays = true;
+              };
               homes.alice.pins.nixpkgs.cowsay = pin;
             }
           );
@@ -159,6 +162,7 @@
                   (final: prev: {
                     hello = prev.hello.overrideAttrs { pname = "hello-local"; };
                     cowsay = prev.cowsay.overrideAttrs { pname = "cowsay-local"; };
+                    figlet = prev.figlet.overrideAttrs { pname = "figlet-local"; };
                   })
                 ];
                 boot.loader.grub.enable = false;
@@ -167,6 +171,11 @@
                   fsType = "tmpfs";
                 };
                 system.stateVersion = nixpkgs.lib.trivial.release;
+              }
+              {
+                nixpkgs.overlays = nixpkgs.lib.mkOrder 2000 [
+                  (final: prev: { figlet = prev.figlet.overrideAttrs (o: { pname = o.pname + "-x"; }); })
+                ];
               }
               (
                 { extra-pkgs, ... }:
@@ -344,6 +353,17 @@
           module =
             assert machine.pkgs.hello.pname == "hello";
             assert machine.pkgs.cowsay.pname == "cowsay-local";
+            assert machine.pkgs.figlet.pname == "figlet-local-x";
+            assert
+              (machine.config.programs.nixheal.importPinned {
+                inherit locked;
+                overlays = true;
+              }).figlet.pname == "figlet-local";
+            assert
+              (machine.config.programs.nixheal.importPinned {
+                inherit locked;
+                overlays = false;
+              }).figlet.pname == "figlet";
             assert machine.config.programs.nixheal.packageSets ? extra;
             assert machine.config.environment.etc."extra-hello".text == "hello";
             assert settings.self == "test";

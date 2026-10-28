@@ -132,7 +132,8 @@ let
   };
   broken = what: "echo ${what} does not compile >&2; exit 1";
   base = self: {
-    inherit config;
+    inherit config overlays;
+    helloTag = if state.extra == "tagarg" then ({ flavor }: "-${flavor}") else ({ }: "-plain");
     inherit (state) moduleError;
     stdenv.hostPlatform.system = system;
     stdenv.buildPlatform.system = system;
@@ -145,7 +146,7 @@ let
         throw "Refusing to evaluate package 'hello-9' in /nix/store/x-source/pkgs/by-name/he/hello/package.nix:1 because it is marked as insecure"
       else if state.hello == "foreign" then
         derivation { name = "hello-foreign"; system = "aarch64-darwin"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; inherit (state) salt; }
-      else mk "hello-${state.hello}" "hello" [ ] (
+      else mk "hello-${state.hello}${self.helloSuffix or ""}" "hello" [ ] (
       if state.hello == "broken" then broken "hello"
       else if state.hello == "slow" then "i=0; while [ $i -lt 30000000 ]; do i=$((i + 1)); done; echo hello > $out"
       else "echo hello > $out"
@@ -180,7 +181,7 @@ in
 fix (builtins.foldl' extend base overlays)
 EOF
 
-cp "$repo/nix/overlay.nix" "$repo/nix/platform.nix" "$sys/"
+cp "$repo/nix/overlay.nix" "$repo/nix/platform.nix" "$repo/nix/import-pinned.nix" "$repo/nix/marked.nix" "$sys/"
 cat >"$sys/flake.nix" <<EOF
 {
   inputs.toypkgs = { url = "git+file://$toy"; flake = false; };
@@ -208,6 +209,26 @@ cat >"$sys/flake.nix" <<EOF
             packageSets = { toypkgs = pkgs; toypkgs2 = pkgs2; };
           };
           config.system.build.toplevel = toplevel name { } (paths pkgs pkgs2);
+        };
+      mkOverlaid = name: user: paths:
+        let
+          marked = import ./marked.nix;
+          nixheal = marked.wrap (import ./overlay.nix) true { pins = ./pins.json; kind = "hosts"; inherit name; input = "toypkgs"; };
+          pkgs = import toypkgs { inherit system; overlays = [ user nixheal ]; };
+        in {
+          config.programs.nixheal = {
+            enable = true;
+            inherit name;
+            pinsFile = ./pins.json;
+            packageSets.toypkgs = pkgs;
+            pinnedOverlays = true;
+            importPinned = { locked, overlays }: import ./import-pinned.nix {
+              config = { };
+              buildPlatform = { inherit system; };
+              hostPlatform = { inherit system; };
+            } { inherit locked; overlays = if overlays then marked.before pkgs.overlays else [ ]; };
+          };
+          config.system.build.toplevel = toplevel name { } (paths pkgs);
         };
       mkEmbedding = name: paths:
         let pkgs = import toypkgs { inherit system; overlays = [ (ov name "toypkgs") ]; };
@@ -261,6 +282,8 @@ cat >"$sys/flake.nix" <<EOF
       nixosConfigurations.c = mkHost "c" (p: [ p.tool p.webui p.fetched ]);
       nixosConfigurations.e = mkTwo "e" (p: p2: [ p2.app ]);
       nixosConfigurations.d = mkEmbedding "d" (p: [ p.hello ]);
+      nixosConfigurations.o = mkOverlaid "o" (final: prev: { helloSuffix = "-patched"; }) (p: [ p.hello ]);
+      nixosConfigurations.o2 = mkOverlaid "o2" (final: prev: { helloSuffix = prev.helloTag { flavor = "patched"; }; }) (p: [ p.hello ]);
       homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]) { };
       homeConfigurations.elaborated = mkHostOf "homes" "elaborated" (p: [ p.hello ]) { };
       nixosConfigurations.misnamed = mkHostOf "hosts" "misnamed" (p: [ p.hello ]) { name = "other"; };
@@ -271,7 +294,7 @@ EOF
 write_config ""
 
 git -C "$sys" init -q -b main
-git -C "$sys" add flake.nix overlay.nix platform.nix
+git -C "$sys" add flake.nix overlay.nix platform.nix import-pinned.nix marked.nix
 revision ok false 1 ok
 nix flake lock "$sys"
 git -C "$sys" add flake.lock
@@ -872,8 +895,8 @@ step "a flake in a subdirectory of its repository"
 repo2="$work/repo2"
 mkdir -p "$repo2/nixos"
 git -C "$repo2" init -q -b main
-cp "$sys/flake.nix" "$sys/overlay.nix" "$sys/platform.nix" "$repo2/nixos/"
-git -C "$repo2" add nixos/flake.nix nixos/overlay.nix nixos/platform.nix
+cp "$sys/flake.nix" "$sys/overlay.nix" "$sys/platform.nix" "$sys/import-pinned.nix" "$sys/marked.nix" "$repo2/nixos/"
+git -C "$repo2" add nixos/flake.nix nixos/overlay.nix nixos/platform.nix nixos/import-pinned.nix nixos/marked.nix
 nix flake lock "$repo2/nixos" 2>/dev/null
 git -C "$repo2" add nixos/flake.lock
 git -C "$repo2" commit -qm "a flake in nixos/"
@@ -944,5 +967,31 @@ nixheal_ build --update --no-commit || fail "pinning hello for a home whose conf
 expect_log "pinned home elaborated: hello (toypkgs)"
 expect_log "home elaborated builds"
 git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "a pinned package keeps the host's own overlays"
+write_config "" "" '"o"'
+revision fixed false 70 ok
+nixheal_ build --update --no-commit || fail "o did not build"
+expect_built o "hello-70-patched"
+revision fixed false broken ok
+nixheal_ build --update --no-commit || fail "pinning hello on o gave up"
+expect_pins o "toypkgs.hello"
+[ "$(field o toypkgs hello overlays)" = "1" ] || fail "the pin of hello on o does not carry the overlays"
+expect_built o "hello-70-patched"
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "an overlay that does not evaluate on the old nixpkgs: the pin goes without it, with a warning"
+write_config "" "" '"b"'
+revision fixed false 71 ok
+nixheal_ build --update --no-commit || fail "b did not build"
+write_config "" "" '"o2"'
+revision fixed false broken ok false tagarg
+nixheal_ build --update --no-commit || fail "pinning hello on o2 gave up"
+expect_log "o2: hello (toypkgs) is pinned without your overlays: with them it does not evaluate on the old nixpkgs"
+expect_pins o2 "toypkgs.hello"
+[ "$(field o2 toypkgs hello overlays)" = "" ] || fail "the pin of hello on o2 should not carry the overlays"
+expect_built o2 "hello-71"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
 
 printf '\nall e2e steps passed\n'

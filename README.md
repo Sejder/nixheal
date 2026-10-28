@@ -282,6 +282,7 @@ required, the rest default as the module options do):
 | `deny` | `[ ]` | attributes never to pin, on top of the built-in list; `cuda*` matches a prefix |
 | `quiet` | `false` | always run as `--quiet` |
 | `commit` | `false` | commit `flake.lock` and `pins.json` after each run, as with `--commit` |
+| `pinnedOverlays` | `true` | apply your own nixpkgs overlays to pinned packages (see below) |
 | `package` | this flake's | the nixheal package |
 | `nixpkgs.<input>` | `{ }` | another nixpkgs to import with pins applied: `source`, `config` (default: this host's `nixpkgs.config`), `argName` |
 | `packageSets` | read-only | every package set nixheal pins on this machine, keyed by input |
@@ -300,9 +301,21 @@ The settings are written to `/etc/nixheal.json` (NixOS) or
 updated flake no longer evaluates.
 
 The pin overlay is added with `mkAfter` and replaces each pinned attribute with
-the old nixpkgs' copy, so your own overlays do not apply to a package while it
-is pinned. `lib.mkOverlay { pins, kind ? "hosts", name, input, nixpkgsConfig ? null }`
-is the overlay itself, for package sets the modules do not import. Sets made
+the old nixpkgs' copy. That copy is imported with your own overlays, the ones
+ordered before nixheal's (those after it apply on top as usual), so a pinned
+package keeps your patches and is the copy your last good system ran. When a
+new pin is made, nixheal evaluates the package both ways: if your overlays do
+not evaluate against the old nixpkgs (they were written for the new one), the
+pin is made without them and a warning names the error. Each pin records its
+choice (`"overlays": true` in `pins.json`; pins without the field, from before
+this, get none). With `pinnedOverlays = false`, pins never get your overlays,
+and a warning says when that changes a pinned package. Extra package sets
+(`programs.nixheal.nixpkgs`) take no overlays of yours, so neither do their
+pins.
+
+`lib.mkOverlay { pins, kind ? "hosts", name, input, nixpkgsConfig ? null, overlays ? [ ] }`
+is the overlay itself, for package sets the modules do not import; `overlays`
+are applied to the pins marked `"overlays": true`. Sets made
 that way are not in `packageSets`, so nixheal does not match failures to them;
 use `programs.nixheal.nixpkgs` for that.
 

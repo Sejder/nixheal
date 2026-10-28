@@ -134,6 +134,17 @@ in
     default = false;
     description = "Only report pins, unpins, holds, warnings and errors, as with --quiet.";
   };
+  pinnedOverlays = mkOption {
+    type = types.bool;
+    default = true;
+    description = "Apply this machine's own nixpkgs overlays (those ordered before nixheal's) to pinned packages, so a pinned package keeps your patches. A pin is made without them when they do not evaluate against the old nixpkgs, with a warning.";
+  };
+  importPinned = mkOption {
+    type = types.raw;
+    readOnly = true;
+    internal = true;
+    description = "How this machine imports a pinned nixpkgs, for nixheal's checks: { locked, overlays }: pkgs, with overlays a bool.";
+  };
   commit = mkOption {
     type = types.bool;
     default = false;

@@ -10,9 +10,10 @@ let
   cfg = config.programs.nixheal;
   nhFlake = config.programs.nh.flake or null;
 
+  marked = import ./marked.nix;
   overlay =
     input: nixpkgsConfig:
-    self.lib.mkOverlay {
+    marked.wrap self.lib.mkOverlay cfg.pinnedOverlays {
       pins = cfg.pinsFile;
       kind = "hosts";
       inherit (cfg) name;
@@ -107,6 +108,16 @@ in
       ];
     })
     {
+      programs.nixheal.importPinned =
+        { locked, overlays }:
+        import ./import-pinned.nix {
+          config = if options.nixpkgs.pkgs.isDefined then pkgs.config else config.nixpkgs.config;
+          inherit lib;
+          inherit (pkgs.stdenv) buildPlatform hostPlatform;
+        } {
+          inherit locked;
+          overlays = if overlays then marked.before (pkgs.overlays or [ ]) else [ ];
+        };
       programs.nixheal.packageSets = {
         ${cfg.input} = pkgs;
       }

@@ -54,6 +54,10 @@ pub struct Pin {
     /// For an evaluation failure, what nix said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whether the machine's own overlays apply to the pinned copy; missing
+    /// for pins made before nixheal checked, which get none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlays: Option<bool>,
     pub checked_nar_hash: String,
 }
 
@@ -349,6 +353,7 @@ mod tests {
             failed_drv: Some("/nix/store/aaa-libfoo-1.2.drv".into()),
             trail: vec!["libfoo-1.2".into(), "obs-studio-31".into()],
             error: None,
+            overlays: None,
             checked_nar_hash: "sha256-Y".into(),
         }
     }

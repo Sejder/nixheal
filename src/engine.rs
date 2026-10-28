@@ -831,6 +831,7 @@ impl Engine {
                     ));
                     continue;
                 }
+                let overlays = choose_overlays(&self.nix, &st.target, input, attr, &locked);
                 added.push((
                     input.clone(),
                     attr.clone(),
@@ -841,6 +842,7 @@ impl Engine {
                         failed_drv: w.failed_drv.clone(),
                         trail: w.trail.clone(),
                         error: w.error.clone(),
+                        overlays,
                         checked_nar_hash: checked,
                     },
                 ));
@@ -1190,6 +1192,65 @@ fn flake_relative(path: &str) -> Option<String> {
     })?;
     let rel = parts[object + 1..].join("/");
     (!rel.is_empty()).then_some(rel)
+}
+
+/// Whether a new pin of `attr` from `locked` should carry the target's own
+/// overlays: with programs.nixheal.pinnedOverlays on, yes when the overlaid
+/// copy evaluates on the old nixpkgs; a warning says when they are left out
+/// and change the package. None when the target cannot tell (no
+/// importPinned, e.g. a hand-written configuration).
+pub fn choose_overlays(
+    nix: &Nix,
+    target: &Target,
+    input: &str,
+    attr: &str,
+    locked: &serde_json::Value,
+) -> Option<bool> {
+    let json = serde_json::to_string(locked).ok()?;
+    if !resolve::is_attr_name(attr) || json.contains("''") || json.contains("${") {
+        return None;
+    }
+    // Evaluated one way at a time: an overlay that breaks on the old nixpkgs
+    // is an error tryEval cannot catch.
+    let probe = |with: bool| {
+        nix.eval_apply(
+            &target.nixheal_config(),
+            &format!(
+                "c: if !(c ? importPinned) then null else {{ carry = c.pinnedOverlays or true; out = (c.importPinned {{ locked = builtins.fromJSON ''{json}''; overlays = {with}; }}).{attr}.outPath; }}"
+            ),
+        )
+    };
+    let out = |v: &serde_json::Value| v["out"].as_str().map(str::to_string);
+    match probe(true) {
+        Ok(serde_json::Value::Null) => None,
+        Ok(with) => {
+            let carry = with["carry"].as_bool().unwrap_or(true);
+            let plain = probe(false).ok().and_then(|v| out(&v));
+            let changes = plain.is_some() && plain != out(&with);
+            if carry && changes {
+                log::info(&format!(
+                    "{target}: {attr} ({input}) is pinned with your overlays, which change it, so it may build locally"
+                ));
+            } else if !carry && changes {
+                log::warn(&format!(
+                    "{target}: {attr} ({input}) is pinned without your overlays, which change it; set programs.nixheal.pinnedOverlays = true to keep them"
+                ));
+            }
+            Some(carry)
+        }
+        Err(e) => match probe(false) {
+            Ok(plain) if !plain.is_null() => {
+                if plain["carry"].as_bool().unwrap_or(true) {
+                    log::warn(&format!(
+                        "{target}: {attr} ({input}) is pinned without your overlays: with them it does not evaluate on the old nixpkgs: {}",
+                        logparse::headline(&e.to_string())
+                    ));
+                }
+                Some(false)
+            }
+            _ => Some(false),
+        },
+    }
 }
 
 /// "1 package", "2 packages".

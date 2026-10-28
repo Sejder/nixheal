@@ -1192,6 +1192,7 @@ pub fn pin(
     let pins_path = ctx.pins_path();
     ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref(), false)?;
     let mut file = PinsFile::load(&pins_path)?;
+    let overlays = engine::choose_overlays(&Nix::new(&ctx.flake), &target, input, attr, &locked);
     let at_rev = engine::describe_dated(&locked);
     let entry = file.entry_mut(target.kind, &target.name);
     if let Some(old) = entry.get(input, attr) {
@@ -1215,6 +1216,7 @@ pub fn pin(
             failed_drv: None,
             trail: Vec::new(),
             error: None,
+            overlays,
             checked_nar_hash: checked,
         },
     );
