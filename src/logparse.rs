@@ -9,8 +9,13 @@ pub enum Failure {
     /// A derivation that could not run here (wrong platform, no builder, a
     /// timeout, out of memory): not something a pin can fix.
     Infra { drv: String, reason: String },
-    /// An attribute evaluation refused: missing, removed, broken or insecure.
+    /// An attribute that no longer evaluates: missing, removed, or marked
+    /// broken. Pinning it to the last good nixpkgs can fix that.
     Eval { attr: String },
+    /// An attribute nixpkgs refuses for a reason that is a decision, not a
+    /// breakage: marked insecure, unfree, or unsupported. Pinning around that
+    /// would bypass nixpkgs' guard or the user's own settings.
+    Refused { attr: String, reason: String },
 }
 
 static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
@@ -24,7 +29,8 @@ static HASH_MISMATCH: LazyLock<Regex> = LazyLock::new(|| {
 static MISSING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"attribute '([^']+)' missing").unwrap());
 static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Refusing to evaluate package '([^']+)' in (\S+?)(?::\d+)? because").unwrap()
+    Regex::new(r"Refusing to evaluate package '([^']+)' in (\S+?)(?::\d+)? because ((?s).*)")
+        .unwrap()
 });
 static BY_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/pkgs/by-name/[^/]+/([^/]+)/package\.nix$").unwrap());
@@ -134,7 +140,18 @@ pub fn error_message(line: &str) -> Option<String> {
 /// Whether a "Cannot build" reason means the build ran and failed, as opposed
 /// to a dependency failing or the build not being able to run here.
 fn reason_is_build_failure(reason: &str) -> bool {
-    reason.contains("builder failed") || reason.contains("hash mismatch")
+    (reason.contains("builder failed") && !reason.contains("due to signal"))
+        || reason.contains("hash mismatch")
+}
+
+/// Whether a refusal is only "marked broken", which a pin can fix, as opposed
+/// to insecure, unfree or unsupported, which are decisions to respect.
+fn refusal_is_breakage(why: &str) -> bool {
+    let why = why.to_lowercase();
+    why.contains("broken")
+        && !why.contains("insecure")
+        && !why.contains("unfree")
+        && !why.contains("unsupported")
 }
 
 fn is_dependency_failure(reason: &str) -> bool {
@@ -191,7 +208,19 @@ pub fn parse(messages: &[String]) -> Vec<Failure> {
                 .captures(&c[2])
                 .map(|b| b[1].to_string())
                 .unwrap_or_else(|| strip_version(&c[1]).to_string());
-            push(Failure::Eval { attr });
+            let why = c[3].to_string();
+            if refusal_is_breakage(&why) {
+                push(Failure::Eval { attr });
+            } else {
+                let reason = why
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(':')
+                    .to_string();
+                push(Failure::Refused { attr, reason });
+            }
         } else if let Some(c) = REMOVED.captures(&msg) {
             push(Failure::Eval {
                 attr: c[1].to_string(),
@@ -262,6 +291,18 @@ mod tests {
     }
 
     #[test]
+    fn signal_kills_are_infrastructure() {
+        let msgs = vec!["error: Cannot build '/nix/store/abc-big-1.0.drv'.\n       Reason: builder failed due to signal 9 (Killed).".to_string()];
+        assert_eq!(
+            parse(&msgs),
+            vec![Failure::Infra {
+                drv: "/nix/store/abc-big-1.0.drv".into(),
+                reason: "builder failed due to signal 9 (Killed)".into()
+            }]
+        );
+    }
+
+    #[test]
     fn other_stores_are_recognised() {
         let msgs = vec![
             "error: builder for '/opt/store/abc-foo-1.0.drv' failed with exit code 2".to_string(),
@@ -303,8 +344,9 @@ mod tests {
     #[test]
     fn eval_refused_prefers_by_name_directory() {
         let msgs = vec![
-            "error: Refusing to evaluate package 'hello-2.12.3' in /nix/store/x-source/pkgs/by-name/he/hello/package.nix:16 because it has problems:".to_string(),
-            "error: Refusing to evaluate package 'cuda-merged-12.9' in /nix/store/x-source/pkgs/development/cuda-modules/packages/cudatoolkit.nix:81 because it has an unfree license".to_string(),
+            "error: Refusing to evaluate package 'hello-2.12.3' in /nix/store/x-source/pkgs/by-name/he/hello/package.nix:16 because it has problems:\n- broken: This package is broken.".to_string(),
+            "error: Refusing to evaluate package 'cuda-merged-12.9' in /nix/store/x-source/pkgs/development/cuda-modules/packages/cudatoolkit.nix:81 because it has an unfree license (\u{2018}CUDA EULA\u{2019})".to_string(),
+            "error: Refusing to evaluate package 'hello-2.12.3' in /nix/store/x-source/pkgs/by-name/he/hello/package.nix:16 because it is marked as insecure".to_string(),
         ];
         assert_eq!(
             parse(&msgs),
@@ -312,8 +354,13 @@ mod tests {
                 Failure::Eval {
                     attr: "hello".into()
                 },
-                Failure::Eval {
-                    attr: "cuda-merged".into()
+                Failure::Refused {
+                    attr: "cuda-merged".into(),
+                    reason: "it has an unfree license (\u{2018}CUDA EULA\u{2019})".into()
+                },
+                Failure::Refused {
+                    attr: "hello".into(),
+                    reason: "it is marked as insecure".into()
                 },
             ]
         );
@@ -390,7 +437,7 @@ mod tests {
 
     #[test]
     fn eval_context_innermost_first() {
-        let msg = "error:\n       \u{2026} while evaluating the option `system.build.toplevel':\n       \u{2026} while evaluating the option `warnings':\n       \u{2026} while evaluating the option `systemd.services.open-webui.serviceConfig':\n       \u{2026} while evaluating derivation 'open-webui-0.12.3'\n       error: Refusing to evaluate package 'python3.14-posthog-7.71.0' in /nix/store/x-source/pkgs/development/python-modules/posthog/default.nix:80 because it has problems:\n".to_string();
+        let msg = "error:\n       \u{2026} while evaluating the option `system.build.toplevel':\n       \u{2026} while evaluating the option `warnings':\n       \u{2026} while evaluating the option `systemd.services.open-webui.serviceConfig':\n       \u{2026} while evaluating derivation 'open-webui-0.12.3'\n       error: Refusing to evaluate package 'python3.14-posthog-7.71.0' in /nix/store/x-source/pkgs/development/python-modules/posthog/default.nix:80 because it has problems:\n       - broken: This package is broken.\n".to_string();
         assert_eq!(
             eval_context(std::slice::from_ref(&msg)),
             vec!["open-webui".to_string()]

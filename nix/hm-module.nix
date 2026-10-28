@@ -22,16 +22,32 @@ let
       inherit input nixpkgsConfig;
     };
 
+  platformArgs =
+    if pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system then
+      { inherit (pkgs.stdenv.hostPlatform) system; }
+    else
+      {
+        localSystem = pkgs.stdenv.buildPlatform.system;
+        crossSystem = pkgs.stdenv.hostPlatform.system;
+      };
+
   extraSets = lib.mapAttrs (
     input: set:
-    import set.source {
-      inherit (pkgs.stdenv.hostPlatform) system;
-      inherit (set) config;
-      overlays = lib.optional cfg.enable (overlay input set.config);
-    }
+    import set.source (
+      platformArgs
+      // {
+        inherit (set) config;
+        overlays = lib.optional cfg.enable (overlay input set.config);
+      }
+    )
   ) cfg.nixpkgs;
 
   runsNixheal = !inNixos && (cfg.hosts != [ ] || cfg.homes != [ ]);
+  hmNixpkgsConfig =
+    let
+      c = config.nixpkgs.config or null;
+    in
+    if c == null then { } else c;
   reservedArgs = [
     "pkgs"
     "lib"
@@ -44,12 +60,12 @@ in
 {
   options.programs.nixheal = import ./options.nix {
     inherit lib self pkgs;
-    defaultName = if inNixos then osConfig.networking.hostName else config.home.username;
+    defaultName = if inNixos then osCfg.name or osConfig.networking.hostName else config.home.username;
     defaultEnable = osCfg.enable or false;
     defaultInput = osCfg.input or "nixpkgs";
     defaultPinsFile = osCfg.pinsFile or null;
     defaultFlake = if nhFlake == null then null else toString nhFlake;
-    defaultSetConfig = config.nixpkgs.config or { };
+    defaultSetConfig = hmNixpkgsConfig;
   };
 
   config = lib.mkMerge [
@@ -62,7 +78,9 @@ in
         inNixos && (cfg.hosts != [ ] || cfg.homes != [ ] || cfg.autoUpgrade.enable)
       ) "programs.nixheal.hosts, homes and autoUpgrade in Home Manager only apply to a standalone Home Manager; inside NixOS, set them in the NixOS configuration";
       _module.args = lib.mapAttrs' (input: set: lib.nameValuePair set.argName extraSets.${input}) (
-        lib.filterAttrs (_: set: set.argName != null) cfg.nixpkgs
+        lib.filterAttrs (
+          _: set: set.argName != null && !(builtins.elem set.argName reservedArgs)
+        ) cfg.nixpkgs
       );
     }
     (lib.mkIf (cfg.enable && !globalPkgs) {
@@ -83,10 +101,13 @@ in
         assertion = set.argName == null || !(builtins.elem set.argName reservedArgs);
         message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
       }) cfg.nixpkgs;
-      nixpkgs.overlays = lib.mkAfter [ (overlay cfg.input (config.nixpkgs.config or { })) ];
+      nixpkgs.overlays = lib.mkAfter [ (overlay cfg.input (config.nixpkgs.config or null)) ];
     })
     (lib.mkIf (cfg.enable && runsNixheal) {
-      home.packages = [ cfg.package ];
+      home.packages = [
+        cfg.package
+      ]
+      ++ lib.optional (cfg.switcher == "nh" && !(config.programs.nh.enable or false)) pkgs.nh;
       xdg.configFile."nixheal.json".text = builtins.toJSON {
         kind = "home";
         self = cfg.name;
@@ -98,6 +119,7 @@ in
           deny
           quiet
           switcher
+          input
           ;
       };
     })
@@ -107,15 +129,28 @@ in
           assertion = builtins.elem cfg.name cfg.homes;
           message = "programs.nixheal.autoUpgrade needs this home (${cfg.name}) in programs.nixheal.homes";
         }
+        {
+          assertion = cfg.flake != null;
+          message = "programs.nixheal.autoUpgrade needs programs.nixheal.flake";
+        }
       ];
 
       systemd.user.services.nixheal-upgrade = {
         Unit = {
           Description = "Update the flake with nixheal and switch Home Manager";
+          OnFailure = cfg.autoUpgrade.onFailure;
         };
         Service = {
           Type = "oneshot";
-          Environment = [ "PATH=${config.home.profileDirectory}/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin" ];
+          Environment = [
+            "PATH=${config.home.profileDirectory}/bin:${
+              lib.makeBinPath [
+                pkgs.git
+                pkgs.openssh
+              ]
+            }:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin"
+            "NIXHEAL_CONFIG=${config.xdg.configHome or "${config.home.homeDirectory}/.config"}/nixheal.json"
+          ];
           ExecStart = lib.escapeShellArgs (
             [
               (lib.getExe cfg.package)

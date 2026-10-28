@@ -14,11 +14,22 @@ impl Git {
         let git = Self {
             dir: dir.to_path_buf(),
         };
-        let out = git
+        let out = match git
             .command()
             .args(["rev-parse", "--is-inside-work-tree"])
             .output()
-            .ok()?;
+        {
+            Ok(out) => out,
+            Err(e) => {
+                if dir.ancestors().any(|d| d.join(".git").exists()) {
+                    crate::log::warn(&format!(
+                        "{} is a git repository, but git cannot be run ({e}); nothing will be committed, and a new pins.json will not reach the flake",
+                        dir.display()
+                    ));
+                }
+                return None;
+            }
+        };
         if out.status.success() {
             return Some(git);
         }
@@ -63,6 +74,26 @@ impl Git {
         Ok(())
     }
 
+    fn rev_parse(&self, arg: &str) -> Option<String> {
+        let out = self.command().args(["rev-parse", arg]).output().ok()?;
+        out.status.success().then(|| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string()
+        })
+    }
+
+    /// The repository's git directory, also for worktrees, where .git is a file.
+    pub fn git_dir(&self) -> Option<PathBuf> {
+        self.rev_parse("--absolute-git-dir").map(PathBuf::from)
+    }
+
+    /// Where the flake sits below the repository's top, e.g. "nixos/" for a
+    /// flake in a subdirectory; empty at the top.
+    pub fn prefix(&self) -> String {
+        self.rev_parse("--show-prefix").unwrap_or_default()
+    }
+
     /// Undo --intent-to-add for a file this run created.
     pub fn forget(&self, path: &Path) -> Result<()> {
         let status = self
@@ -104,6 +135,8 @@ impl Git {
             .args([
                 "-c",
                 "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
                 "commit",
                 "-q",
                 "--no-verify",

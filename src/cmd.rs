@@ -20,7 +20,8 @@ fn default_system() -> String {
 
 #[derive(clap::Args)]
 pub struct Where {
-    /// Config file; defaults to ~/.config/nixheal.json, then /etc/nixheal.json.
+    /// Config file; defaults to $NIXHEAL_CONFIG, then ~/.config/nixheal.json,
+    /// then /etc/nixheal.json.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     /// Flake directory; defaults to the config's flake.
@@ -215,6 +216,27 @@ fn activate(
     })
 }
 
+/// Remove GC roots nixheal made for targets that are no longer configured,
+/// so their systems can be collected. Only symlinks with nixheal's names are
+/// touched.
+fn prune_roots(dir: &Path, targets: &[Target]) -> Result<()> {
+    let keep: Vec<String> = targets.iter().map(Target::root_name).collect();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_symlink() && !keep.contains(&name) {
+            let target = std::fs::read_link(entry.path())?;
+            if target.to_string_lossy().contains("/nix/") {
+                std::fs::remove_file(entry.path())?;
+                log::info(&format!(
+                    "removed the root of {name}, which is no longer configured"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn remove_link(link: &Path) -> Result<()> {
     match std::fs::remove_file(link) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -228,6 +250,13 @@ fn remove_link(link: &Path) -> Result<()> {
 /// someone else owns, or a flake that is a store path and cannot be written.
 fn check_flake(flake: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
+    let text = flake.to_string_lossy();
+    if text.contains('#') || text.contains('?') {
+        bail!(
+            "{} contains '#' or '?', which nix reads as part of a flake reference; move the checkout",
+            flake.display()
+        );
+    }
     if flake.starts_with("/nix/store") {
         bail!(
             "{} is in the nix store; point programs.nixheal.flake (or --flake) at your checkout",
@@ -340,9 +369,12 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         old_lock,
         last_good,
         targets,
-        local: guarded,
-        local_target: local.clone(),
-        fallback_inputs: cfg.inputs.clone(),
+        guarded,
+        local: local.clone(),
+        pins_rel: format!(
+            "{}{PINS}",
+            git.as_ref().map(|g| g.prefix()).unwrap_or_default()
+        ),
         deny: cfg.deny.clone(),
         system: args.system.clone(),
         max_rounds: args.max_rounds,
@@ -376,36 +408,48 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    if let Some(dir) = &args.gc_roots {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        for (target, drv) in &report.built {
-            nix::add_root(drv, &dir.join(target.root_name()))?;
+    // From here the run's results stand or fall together: any error before
+    // the commit puts flake.lock and pins.json back.
+    let settled = (|| -> Result<()> {
+        if let Some(dir) = &args.gc_roots {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            for (target, drv) in &report.built {
+                nix::add_root(drv, &dir.join(target.root_name()))?;
+            }
+            if args.only.is_empty() {
+                prune_roots(dir, &cfg.targets())?;
+            }
+            log::info(&format!(
+                "rooted {} system(s) in {}",
+                report.built.len(),
+                dir.display()
+            ));
         }
-        log::info(&format!(
-            "rooted {} system(s) in {}",
-            report.built.len(),
-            dir.display()
-        ));
+        guard::settle(|| {
+            if !args.no_commit
+                && let Some(git) = &git
+            {
+                let title = if update.is_some() {
+                    "nixheal: update flake.lock"
+                } else {
+                    "nixheal: update pins"
+                };
+                let mut message = title.to_string();
+                if !report.changes.is_empty() {
+                    message.push_str("\n\n");
+                    message.push_str(&report.changes.join("\n"));
+                }
+                if git.commit(&[&lock_path, &pins_path], &message)? {
+                    log::info(&format!("committed {title:?}"));
+                }
+            }
+            Ok(())
+        })
+    })();
+    if let Err(e) = settled {
+        guard::restore()?;
+        return Err(e.context("restored flake.lock and pins.json"));
     }
-
-    if !args.no_commit
-        && let Some(git) = &git
-    {
-        let title = if update.is_some() {
-            "nixheal: update flake.lock"
-        } else {
-            "nixheal: update pins"
-        };
-        let mut message = title.to_string();
-        if !report.changes.is_empty() {
-            message.push_str("\n\n");
-            message.push_str(&report.changes.join("\n"));
-        }
-        if git.commit(&[&lock_path, &pins_path], &message)? {
-            log::info(&format!("committed {title:?}"));
-        }
-    }
-    guard::disarm();
 
     // Only now, with the results committed, are these locks known to build.
     for (target, _) in &report.built {
@@ -437,7 +481,7 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
         Some(target) => activate(target, &ctx.flake, built.as_deref(), how, &cfg.switcher),
         None if how != Activation::None => {
             log::info(&format!(
-                "not activating: {} is not among the configured targets",
+                "not activating: {} was not built in this run",
                 cfg.local()
             ));
             Ok(ExitCode::SUCCESS)
@@ -448,6 +492,8 @@ pub fn reconcile(args: &BuildArgs, how: Activation) -> Result<ExitCode> {
 
 pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
+    check_flake(&ctx.flake)?;
+    let _run_lock = guard::lock_flake(&ctx.flake)?;
     let pins_path = ctx.pins_path();
     ensure_pins(&pins_path, Git::open(&ctx.flake).as_ref())?;
     let mut file = PinsFile::load(&pins_path)?;
@@ -563,12 +609,19 @@ pub fn why(pick: &Pick, attr: &str) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn pin(pick: &Pick, attr: &str, input: &str) -> Result<ExitCode> {
+pub fn pin(pick: &Pick, attr: &str, input: Option<&str>) -> Result<ExitCode> {
     if !crate::resolve::is_attr_name(attr) {
         bail!("{attr:?} is not a top-level attribute name");
     }
     let ctx = Ctx::open(&pick.at, false)?;
+    check_flake(&ctx.flake)?;
+    let _run_lock = guard::lock_flake(&ctx.flake)?;
     let target = ctx.target(pick)?;
+    let input = input
+        .map(str::to_string)
+        .or_else(|| ctx.config.as_ref().and_then(|c| c.input.clone()))
+        .unwrap_or_else(|| "nixpkgs".to_string());
+    let input = input.as_str();
     let lock = Lock::load(&ctx.flake.join("flake.lock"))?;
     let Some(locked) = lock.locked(input) else {
         bail!("{input} is not an input of flake.lock");
@@ -606,6 +659,8 @@ pub fn pin(pick: &Pick, attr: &str, input: &str) -> Result<ExitCode> {
 
 pub fn clear(pick: &Pick, attr: Option<&str>, input: Option<&str>, held: bool) -> Result<ExitCode> {
     let ctx = Ctx::open(&pick.at, false)?;
+    check_flake(&ctx.flake)?;
+    let _run_lock = guard::lock_flake(&ctx.flake)?;
     let target = ctx.target(pick)?;
     let pins_path = ctx.pins_path();
     let mut file = PinsFile::load(&pins_path)?;

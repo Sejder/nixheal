@@ -44,14 +44,28 @@ pub fn denied(attr: &str, extra: &[String]) -> bool {
         .any(|p| glob(p, attr))
 }
 
+/// Attribute names a derivation may be known under: its pname, its name
+/// without the version, and for versioned attributes such as nodejs_22 or
+/// postgresql_16 the pname with the version's major part. Every candidate is
+/// confirmed against the drv path before it is used.
 pub fn candidate_names(node: &Node) -> Vec<String> {
-    let mut out = Vec::new();
-    for name in [node.pname.as_deref(), Some(strip_version(&node.name))]
-        .into_iter()
-        .flatten()
-    {
-        if is_attr_name(name) && !out.iter().any(|n| n == name) {
-            out.push(name.to_string());
+    let base = strip_version(&node.name);
+    let pname = node.pname.as_deref().unwrap_or(base);
+    let version = node
+        .name
+        .strip_prefix(base)
+        .and_then(|v| v.strip_prefix('-'))
+        .unwrap_or("");
+    let major: String = version.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let mut names = vec![pname.to_string(), base.to_string()];
+    if !major.is_empty() {
+        names.push(format!("{pname}_{major}"));
+        names.push(format!("{pname}{major}"));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        if is_attr_name(&name) && !out.contains(&name) {
+            out.push(name);
         }
     }
     out
@@ -159,21 +173,34 @@ mod tests {
             pname: Some("obs-studio".into()),
             ..Default::default()
         };
-        assert_eq!(candidate_names(&node), vec!["obs-studio"]);
+        assert_eq!(
+            candidate_names(&node),
+            vec!["obs-studio", "obs-studio_31", "obs-studio31"]
+        );
 
         let node = Node {
             name: "hello-2.12".into(),
             pname: None,
             ..Default::default()
         };
-        assert_eq!(candidate_names(&node), vec!["hello"]);
+        assert_eq!(candidate_names(&node), vec!["hello", "hello_2", "hello2"]);
 
         let node = Node {
             name: "python3.13-requests-2.32".into(),
             pname: Some("requests".into()),
             ..Default::default()
         };
-        assert_eq!(candidate_names(&node), vec!["requests"]);
+        assert_eq!(
+            candidate_names(&node),
+            vec!["requests", "requests_2", "requests2"]
+        );
+
+        let node = Node {
+            name: "nodejs-22.11.0".into(),
+            pname: Some("nodejs".into()),
+            ..Default::default()
+        };
+        assert!(candidate_names(&node).contains(&"nodejs_22".to_string()));
 
         let node = Node {
             name: "unit-foo.service".into(),

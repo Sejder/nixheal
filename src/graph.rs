@@ -9,6 +9,8 @@ pub struct Node {
     pub pname: Option<String>,
     pub inputs: Vec<String>,
     pub parents: Vec<String>,
+    /// A fixed-output derivation, i.e. a download.
+    pub fixed_output: bool,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +48,8 @@ struct EnvJson {
     name: Option<String>,
     #[serde(default)]
     pname: Option<String>,
+    #[serde(default, rename = "outputHash")]
+    output_hash: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +98,7 @@ impl Graph {
                 pname: drv.env.pname,
                 inputs: inputs.into_iter().map(|i| full_path(store, i)).collect(),
                 parents: Vec::new(),
+                fixed_output: drv.env.output_hash.is_some(),
             };
             graph.nodes.insert(full_path(store, path), node);
         }

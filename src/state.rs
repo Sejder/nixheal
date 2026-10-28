@@ -31,6 +31,13 @@ fn last_good_path(flake: &Path, target: Option<&Target>) -> Option<PathBuf> {
     Some(state_dir()?.join(name))
 }
 
+/// The run lock for a flake that is not in a git repository.
+pub fn lock_path(flake: &Path) -> Result<PathBuf> {
+    let dir = state_dir().context("neither XDG_STATE_HOME nor HOME is set")?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir.join(format!("run-{}.lock", key(&flake.to_string_lossy()))))
+}
+
 pub fn load_last_good(flake: &Path, target: Option<&Target>) -> Option<Lock> {
     Lock::load(&last_good_path(flake, target)?).ok()
 }

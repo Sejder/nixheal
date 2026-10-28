@@ -64,19 +64,31 @@ pub fn arm(restore: Restore) {
     }
 }
 
+/// Run `f` so a signal cannot interrupt it halfway: the handler waits for it,
+/// then restores. For writes of the guarded files during a run.
+pub fn critical<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _held = ARMED.lock();
+    f()
+}
+
+/// Run `f`, the step that makes a run's results stand (its commit), and stop
+/// guarding once it succeeded, in one step a signal cannot split: either the
+/// files are restored or they are committed, never reverted under a commit.
+pub fn settle<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+    let result = f();
+    if result.is_ok() {
+        *armed = None;
+    }
+    result
+}
+
 /// Put the files back now, and stop guarding them.
 pub fn restore() -> Result<()> {
     let taken = ARMED.lock().ok().and_then(|mut a| a.take());
     match taken {
         Some(r) => r.apply(),
         None => Ok(()),
-    }
-}
-
-/// Stop guarding the files: the run finished and its results stand.
-pub fn disarm() {
-    if let Ok(mut armed) = ARMED.lock() {
-        *armed = None;
     }
 }
 
@@ -88,11 +100,9 @@ pub struct RunLock {
 }
 
 pub fn lock_flake(flake: &Path) -> Result<RunLock> {
-    let git_dir = flake.join(".git");
-    let path = if git_dir.is_dir() {
-        git_dir.join("nixheal.lock")
-    } else {
-        flake.join(".nixheal.lock")
+    let path = match Git::open(flake).and_then(|g| g.git_dir()) {
+        Some(dir) => dir.join("nixheal.lock"),
+        None => crate::state::lock_path(flake)?,
     };
     let file = std::fs::OpenOptions::new()
         .create(true)

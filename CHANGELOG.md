@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.1
+## Unreleased
 
-Fixes from an independent review of 0.1.0.
+Fixes from two independent reviews of 0.1.0.
 
 Setups where pins silently never applied are now caught before anything
 builds, with an error saying what to change:
@@ -55,6 +55,54 @@ Safety:
 - Home Manager inside NixOS warns when `hosts`, `homes` or `autoUpgrade` are
   set there, since they only apply standalone.
 - A flake path inside the Nix store is refused.
+
+Failures:
+
+- A configuration that no longer evaluates, such as one using a removed NixOS
+  option, holds that host instead of stopping the run.
+- A package nixpkgs refuses to evaluate as insecure, unfree or unsupported
+  holds the host instead of being pinned around; a package marked broken is
+  still pinned.
+- A build that fails without naming a derivation fails the hosts that built,
+  instead of none of them.
+- A build killed by a signal, or a failed download that is not a hash
+  mismatch, is retried once, and a signal counts as infrastructure rather than
+  a broken package.
+- Derivations are matched to versioned attributes such as `nodejs_22`.
+- Derivation paths are recognised in any store directory.
+
+Setups:
+
+- A flake in a subdirectory of its git repository works; `pinsFile` is the
+  `pins.json` next to `flake.lock`, and the run lock lives in the git directory.
+- Home Manager inside NixOS takes its entry name from the host's
+  `programs.nixheal.name` and its input from the host's
+  `programs.nixheal.input`.
+- Home Manager with `nixpkgs.config = null`, and NixOS with `nixpkgs.pkgs`
+  set, no longer break the overlay.
+- Extra package sets and pinned packages are imported for the right platforms
+  when cross-compiling.
+- The timers set `NIXHEAL_CONFIG`, so they read the settings of the module
+  that defined them. The Home Manager timer has git and ssh on its PATH and
+  requires `flake`.
+- New `autoUpgrade.onFailure`, units to start when a run fails.
+- nh is installed when it is the switcher and `programs.nh` is off.
+- `nixheal pin` pins in `programs.nixheal.input` unless `--input` says
+  otherwise.
+
+Robustness:
+
+- `pin`, `clear` and `merge` take the run lock and check the flake path like
+  the build commands.
+- A signal can no longer land between writing `pins.json` and restoring it, or
+  between the commit and the end of guarding, and an error after the build
+  (GC roots, the commit) restores both files.
+- Commits run with `core.hooksPath=/dev/null`, so no hook can run.
+- A flake path containing `#` or `?` is refused.
+- `--gc-roots` removes the roots of targets no longer configured.
+- `--quiet` keeps nix's own error messages.
+- Journal output is detected by the inode in `JOURNAL_STREAM`, so a run piped
+  from a service still prints plainly.
 
 Smaller changes:
 

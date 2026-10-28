@@ -18,8 +18,9 @@ pub struct Config {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub homes: Vec<String>,
+    /// The flake input this machine's pkgs come from.
     #[serde(default)]
-    pub inputs: Vec<String>,
+    pub input: Option<String>,
     #[serde(default = "default_warn_after_days")]
     pub warn_after_days: i64,
     #[serde(default)]

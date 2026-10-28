@@ -117,6 +117,12 @@ in
       default = true;
       description = "Commit flake.lock and pins.json after each run.";
     };
+    onFailure = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "notify-admin@%n.service" ];
+      description = "Units to start when a run fails, e.g. to send a notification.";
+    };
   };
   quiet = mkOption {
     type = types.bool;

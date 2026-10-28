@@ -72,8 +72,9 @@ enum Command {
         #[command(flatten)]
         pick: cmd::Pick,
         attr: String,
-        #[arg(long, default_value = "nixpkgs")]
-        input: String,
+        /// The input to pin it in; defaults to programs.nixheal.input.
+        #[arg(long)]
+        input: Option<String>,
     },
     /// Remove a pin, or release a held host with --held.
     Clear {
@@ -97,7 +98,7 @@ fn main() -> ExitCode {
         Command::Merge { at, file } => cmd::merge(at, file),
         Command::Status { at, json } => cmd::status(at, *json),
         Command::Why { pick, attr } => cmd::why(pick, attr),
-        Command::Pin { pick, attr, input } => cmd::pin(pick, attr, input),
+        Command::Pin { pick, attr, input } => cmd::pin(pick, attr, input.as_deref()),
         Command::Clear {
             pick,
             attr,

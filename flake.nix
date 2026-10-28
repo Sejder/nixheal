@@ -84,6 +84,7 @@
           );
           prev = {
             stdenv.hostPlatform.system = system;
+            stdenv.buildPlatform.system = system;
             config = { };
             hello = "new";
             cowsay = "new";
@@ -178,8 +179,12 @@
                   default = [ ];
                 };
                 nixpkgs.config = lib.mkOption {
-                  type = lib.types.attrs;
-                  default = { };
+                  type = lib.types.nullOr lib.types.attrs;
+                  default = null;
+                };
+                xdg.configHome = lib.mkOption {
+                  type = lib.types.str;
+                  default = "/home/alice/.config";
                 };
                 assertions = lib.mkOption {
                   type = lib.types.listOf lib.types.raw;
@@ -204,10 +209,55 @@
                   homes = [ "alice" ];
                   flake = "/home/alice/nixos";
                   autoUpgrade.enable = true;
+                  nixpkgs.extra.source = nixpkgs;
                 };
               }
             ];
           };
+          homeInNixos = nixpkgs.lib.evalModules {
+            modules = [
+              hmStub
+              self.homeManagerModules.default
+              {
+                _module.args.pkgs = pkgs;
+                _module.args.osConfig = {
+                  networking.hostName = "alice-laptop";
+                  home-manager.useGlobalPkgs = false;
+                  programs.nixheal = {
+                    enable = true;
+                    name = "laptop";
+                    input = "nixos";
+                    pinsFile = pins;
+                  };
+                };
+                home.username = "alice";
+              }
+            ];
+          };
+          shadowing = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.default
+              {
+                networking.hostName = "test";
+                programs.nixheal = {
+                  enable = true;
+                  pinsFile = pins;
+                  nixpkgs.extra = {
+                    source = nixpkgs;
+                    argName = "pkgs";
+                  };
+                };
+                boot.loader.grub.enable = false;
+                fileSystems."/" = {
+                  device = "none";
+                  fsType = "tmpfs";
+                };
+                system.stateVersion = nixpkgs.lib.trivial.release;
+              }
+            ];
+          };
+          probe = machine.config.programs.nixheal;
           homeSettings = builtins.fromJSON home.config.xdg.configFile."nixheal.json".text;
           homeUpgrade = home.config.systemd.user.services.nixheal-upgrade;
           failedAssertions = cfg: builtins.filter (a: !a.assertion) cfg.assertions;
@@ -253,6 +303,13 @@
             assert machine.config.systemd.timers.nixheal-upgrade.timerConfig.OnCalendar == "04:40";
             assert !(settings ? inputs);
             assert machine.config.programs.nixheal.packageSets ? nixpkgs;
+            assert settings.input == "nixpkgs";
+            assert upgrade.environment.NIXHEAL_CONFIG == "/etc/nixheal.json";
+            assert upgrade.unitConfig.OnFailure == [ ];
+            assert builtins.any (p: (p.pname or "") == "nh") machine.config.environment.systemPackages;
+            assert probe.enable && probe.name == "test";
+            assert nixpkgs.lib.hasSuffix "-pins.json" (toString probe.pinsFile);
+            assert builtins.attrNames probe.packageSets == [ "extra" "nixpkgs" ];
             assert builtins.elem machine.config.programs.nixheal.package machine.config.environment.systemPackages;
             pkgs.runCommand "nixheal-module-check" { } "touch $out";
           activate-refuses =
@@ -286,6 +343,13 @@
             assert !(homeUpgrade.Unit ? After);
             assert home.config.systemd.user.timers.nixheal-upgrade.Timer.OnCalendar == "04:40";
             assert builtins.elem home.config.programs.nixheal.package home.config.home.packages;
+            assert home.config.programs.nixheal.packageSets.extra ? hello;
+            assert homeInNixos.config.programs.nixheal.name == "laptop";
+            assert homeInNixos.config.programs.nixheal.input == "nixos";
+            assert homeInNixos.config.programs.nixheal.packageSets ? nixos;
+            assert builtins.any (a: nixpkgs.lib.hasInfix "argName = \"pkgs\" would shadow" a.message) (
+              failedAssertions shadowing.config
+            );
             pkgs.runCommand "nixheal-home-module-check" { } "touch $out";
         }
       );

@@ -108,7 +108,7 @@ nixheal_() {
 
 revision() {
   cat >"$toy/state.nix" <<EOF
-{ libfoo = "$1"; goneRemoved = $2; hello = "$3"; linux = "$4"; salt = "$salt"; }
+{ libfoo = "$1"; goneRemoved = $2; hello = "$3"; linux = "$4"; moduleError = ${5:-false}; salt = "$salt"; }
 EOF
   git -C "$toy" add -A
   git -C "$toy" commit -qm "libfoo=$1 gone-removed=$2 hello=$3 linux=$4"
@@ -131,12 +131,19 @@ let
   broken = what: "echo ${what} does not compile >&2; exit 1";
   base = self: {
     inherit config;
+    inherit (state) moduleError;
     stdenv.hostPlatform.system = system;
+    stdenv.buildPlatform.system = system;
     libfoo = mk "libfoo-1.0" "libfoo" [ ] (
       if state.libfoo == "broken" then broken "libfoo" else "echo libfoo-${state.libfoo} > $out"
     );
     app = mk "app-2.0" "app" [ self.libfoo ] "echo app $deps > $out";
-    hello = mk "hello-${state.hello}" "hello" [ ] (
+    hello =
+      if state.hello == "insecure" then
+        throw "Refusing to evaluate package 'hello-9' in /nix/store/x-source/pkgs/by-name/he/hello/package.nix:1 because it is marked as insecure"
+      else if state.hello == "foreign" then
+        derivation { name = "hello-foreign"; system = "aarch64-darwin"; builder = "/bin/sh"; args = [ "-c" "echo > $out" ]; inherit (state) salt; }
+      else mk "hello-${state.hello}" "hello" [ ] (
       if state.hello == "broken" then broken "hello"
       else if state.hello == "slow" then "i=0; while [ $i -lt 30000000 ]; do i=$((i + 1)); done; echo hello > $out"
       else "echo hello > $out"
@@ -174,12 +181,15 @@ cat >"$sys/flake.nix" <<EOF
             paths = paths pkgs;
           };
         in rec {
-          config.programs.nixheal = {
-            enable = true;
-            inherit name;
-            pinsFile = ./pins.json;
-            packageSets.toypkgs = pkgs;
-          } // settings;
+          config.programs.nixheal =
+            if pkgs.moduleError && name == "b" then
+              throw "The option \`services.gone' does not exist. Definition values:"
+            else {
+              enable = true;
+              inherit name;
+              pinsFile = ./pins.json;
+              packageSets.toypkgs = pkgs;
+            } // settings;
           activationPackage = config.system.build.toplevel;
           config.system.build.toplevel = derivation {
             name = "toplevel-\${name}";
@@ -406,7 +416,7 @@ expect_log 'has programs.nixheal.name = "other"; it must be "misnamed"'
 reject_log "round 1"
 write_config "" "" '"elsewhere"'
 if nixheal_ build; then fail "a pinsFile outside the flake root should be refused"; fi
-expect_log "pinsFile = sub/pins.json; it must be pins.json at the flake root"
+expect_log "pinsFile = sub/pins.json; it must be pins.json, the pins.json next to flake.lock"
 reject_log "round 1"
 write_config ""
 
@@ -449,7 +459,12 @@ for _ in $(seq 60); do
   sleep 0.5
 done
 grep -q "round 1" "$log" || fail "the slow build never started"
-sleep 2
+cp "$log" "$work/bg.log"
+if "$nixheal" build --config "$config" >/dev/null 2>"$work/second.log"; then fail "a second run started while one was running"; fi
+grep -qF "another nixheal run is using" "$work/second.log" || fail "the second run was not refused for the lock: $(cat "$work/second.log")"
+if "$nixheal" pin hello --input toypkgs --config "$config" >/dev/null 2>"$work/second.log"; then fail "nixheal pin ran during a run"; fi
+grep -qF "another nixheal run is using" "$work/second.log" || fail "nixheal pin was not refused for the lock: $(cat "$work/second.log")"
+sleep 1
 kill -TERM "$pid"
 set +e
 wait "$pid"
@@ -461,5 +476,66 @@ cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restore
 cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored after SIGTERM"
 revision fixed false 10 ok
 nixheal_ build --update || fail "nixheal build gave up after the interrupted run"
+
+step "a configuration that no longer evaluates holds that host, and the others move on"
+revision fixed false 11 ok true
+nixheal_ build --update --no-commit || fail "a module error on b should hold b, not stop the run"
+case "$(held_reason b)" in *"does not evaluate"*"services.gone"*) ;; *) fail "b should be held for its module error: $(held_reason b)" ;; esac
+expect_built a hello-11
+git -C "$sys" checkout -q -- flake.lock pins.json
+revision fixed false 12 ok
+nixheal_ build --update || fail "nixheal build gave up after the module error"
+
+step "an insecure package is not pinned around"
+revision fixed false insecure ok
+cp "$sys/flake.lock" "$work/before.lock"
+if nixheal_ build --update; then fail "an insecure hello on the local host should give up"; fi
+expect_log "nixpkgs refuses hello because it is marked as insecure"
+reject_log "pinned host a"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored"
+revision fixed false 13 ok
+nixheal_ build --update || fail "nixheal build gave up after the insecure revision"
+
+step "--max-new-pins: a host needing too many new pins is held"
+write_config '"linux"'
+revision broken false broken ok
+nixheal_ build --update --hold-local --no-commit --max-new-pins 1 || fail "the run with --max-new-pins 1 gave up"
+case "$(held_reason b)" in *"more than 1 new pins"*) ;; *) fail "b should be held for needing two pins: $(held_reason b)" ;; esac
+expect_pins a "toypkgs.hello"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
+revision fixed false 14 ok
+nixheal_ build --update || fail "nixheal build gave up after the max-new-pins revision"
+
+step "a build that cannot run here stops the run, pins nothing and restores the files"
+revision fixed false foreign ok
+cp "$sys/flake.lock" "$work/before.lock"
+cp "$sys/pins.json" "$work/before.json"
+if nixheal_ build --update; then fail "a platform mismatch should stop the run"; fi
+expect_log "could not run on this machine"
+expect_log "platform mismatch"
+reject_log "pinned host"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored after the platform mismatch"
+cmp -s "$sys/pins.json" "$work/before.json" || fail "pins.json was not restored after the platform mismatch"
+revision fixed false 15 ok
+nixheal_ build --update || fail "nixheal build gave up after the platform mismatch"
+
+step "a flake in a subdirectory of its repository"
+repo2="$work/repo2"
+mkdir -p "$repo2/nixos"
+git -C "$repo2" init -q -b main
+cp "$sys/flake.nix" "$sys/overlay.nix" "$repo2/nixos/"
+git -C "$repo2" add nixos/flake.nix nixos/overlay.nix
+nix flake lock "$repo2/nixos" 2>/dev/null
+git -C "$repo2" add nixos/flake.lock
+git -C "$repo2" commit -qm "a flake in nixos/"
+sub_config="$work/sub.json"
+cat >"$sub_config" <<EOF
+{ "kind": "nixos", "self": "a", "flake": "$repo2/nixos", "hosts": ["a"], "homes": [], "warnAfterDays": 14, "deny": [] }
+EOF
+"$nixheal" build --config "$sub_config" >"$work/stdout" 2>"$log" || fail "a flake in a subdirectory was refused: $(cat "$log")"
+[ -f "$repo2/nixos/pins.json" ] || fail "pins.json was not created next to the subdirectory's flake.lock"
+git -C "$repo2" ls-files --error-unmatch nixos/pins.json >/dev/null || fail "the subdirectory's pins.json is not tracked"
+[ -e "$repo2/nixos/.nixheal.lock" ] && fail "the run lock was left in the work tree"
 
 printf '\nall e2e steps passed\n'

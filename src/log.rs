@@ -12,8 +12,24 @@ pub fn is_quiet() -> bool {
     QUIET.load(Ordering::Relaxed)
 }
 
+/// Whether stderr is the journal: systemd sets JOURNAL_STREAM to the
+/// device and inode of the stream it connected, which a terminal or a pipe a
+/// child of the service opened does not match.
 fn journal() -> bool {
-    std::env::var_os("JOURNAL_STREAM").is_some()
+    use std::os::unix::fs::MetadataExt;
+    let Some(stream) = std::env::var_os("JOURNAL_STREAM") else {
+        return false;
+    };
+    let Some((dev, ino)) = stream
+        .to_string_lossy()
+        .split_once(':')
+        .map(|(d, i)| (d.to_string(), i.to_string()))
+    else {
+        return false;
+    };
+    std::fs::metadata("/proc/self/fd/2")
+        .map(|m| m.dev().to_string() == dev && m.ino().to_string() == ino)
+        .unwrap_or(false)
 }
 
 /// Progress; hidden with --quiet.
@@ -36,11 +52,9 @@ pub fn nix_progress(msg: &str) {
     }
 }
 
-/// An error message forwarded from nix; hidden with --quiet.
+/// An error message forwarded from nix; shown with --quiet too.
 pub fn nix_error(msg: &str) {
-    if !is_quiet() {
-        eprintln!("{msg}");
-    }
+    eprintln!("{msg}");
 }
 
 /// Logged at warning priority when stderr goes to the journal.

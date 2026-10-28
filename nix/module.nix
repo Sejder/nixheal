@@ -3,6 +3,7 @@ self:
   config,
   lib,
   pkgs,
+  options,
   ...
 }:
 let
@@ -18,13 +19,24 @@ let
       inherit input nixpkgsConfig;
     };
 
+  platformArgs =
+    if pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system then
+      { inherit (pkgs.stdenv.hostPlatform) system; }
+    else
+      {
+        localSystem = pkgs.stdenv.buildPlatform.system;
+        crossSystem = pkgs.stdenv.hostPlatform.system;
+      };
+
   extraSets = lib.mapAttrs (
     input: set:
-    import set.source {
-      inherit (pkgs.stdenv.hostPlatform) system;
-      inherit (set) config;
-      overlays = lib.optional cfg.enable (overlay input set.config);
-    }
+    import set.source (
+      platformArgs
+      // {
+        inherit (set) config;
+        overlays = lib.optional cfg.enable (overlay input set.config);
+      }
+    )
   ) cfg.nixpkgs;
 
   runsNixheal = cfg.hosts != [ ] || cfg.homes != [ ];
@@ -97,7 +109,9 @@ in
       }
       // extraSets;
       _module.args = lib.mapAttrs' (input: set: lib.nameValuePair set.argName extraSets.${input}) (
-        lib.filterAttrs (_: set: set.argName != null) cfg.nixpkgs
+        lib.filterAttrs (
+          _: set: set.argName != null && !(builtins.elem set.argName reservedArgs)
+        ) cfg.nixpkgs
       );
     }
     (lib.mkIf cfg.enable {
@@ -118,10 +132,15 @@ in
         assertion = set.argName == null || !(builtins.elem set.argName reservedArgs);
         message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
       }) cfg.nixpkgs;
-      nixpkgs.overlays = lib.mkAfter [ (overlay cfg.input config.nixpkgs.config) ];
+      nixpkgs.overlays = lib.mkAfter [
+        (overlay cfg.input (if options.nixpkgs.pkgs.isDefined then null else config.nixpkgs.config))
+      ];
     })
     (lib.mkIf (cfg.enable && runsNixheal) {
-      environment.systemPackages = [ cfg.package ];
+      environment.systemPackages = [
+        cfg.package
+      ]
+      ++ lib.optional (cfg.switcher == "nh" && !(config.programs.nh.enable or false)) pkgs.nh;
       environment.etc."nixheal.json".text = builtins.toJSON {
         kind = "nixos";
         self = cfg.name;
@@ -133,6 +152,7 @@ in
           deny
           quiet
           switcher
+          input
           ;
       };
     })
@@ -166,12 +186,16 @@ in
           pkgs.coreutils
           config.programs.ssh.package
         ];
-        environment = lib.mkIf (up.user == "root") {
+        environment = {
+          NIXHEAL_CONFIG = "/etc/nixheal.json";
+        }
+        // lib.optionalAttrs (up.user == "root") {
           GIT_AUTHOR_NAME = "nixheal";
           GIT_AUTHOR_EMAIL = "nixheal@${config.networking.hostName}";
           GIT_COMMITTER_NAME = "nixheal";
           GIT_COMMITTER_EMAIL = "nixheal@${config.networking.hostName}";
         };
+        unitConfig.OnFailure = up.onFailure;
         serviceConfig = {
           Type = "oneshot";
           User = up.user;

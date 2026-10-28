@@ -144,7 +144,7 @@ impl PinsFile {
             Some(v) if v == VERSION as u64 => Ok(serde_json::from_value(json)?),
             Some(v) => bail!("pins file version {v} is not supported (expected {VERSION})"),
             None if json.as_object().is_some_and(|o| o.is_empty()) => Ok(Self::default()),
-            None => bail!("not an nixheal pins file (no version)"),
+            None => bail!("not a nixheal pins file (no version)"),
         }
     }
 
@@ -200,8 +200,8 @@ impl PinsFile {
     }
 
     /// Put `entry` in place unless the file already holds one computed from a
-    /// newer lock, e.g. a fleet run that landed while this one was building.
-    /// Returns whether the entry was taken.
+    /// newer lock: how `nixheal merge` combines two files, e.g. a fleet's
+    /// published pins with a checkout's. Returns whether the entry was taken.
     pub fn merge(&mut self, kind: Kind, name: &str, entry: Entry) -> bool {
         let section = self.section_mut(kind);
         if let Some(existing) = section.get(name)

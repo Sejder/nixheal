@@ -22,10 +22,20 @@ let
   sources = builtins.listToAttrs (
     map (pin: {
       name = pin.locked.narHash;
-      value = import (builtins.fetchTree pin.locked) {
-        inherit (prev.stdenv.hostPlatform) system;
-        config = importConfig;
-      };
+      value = import (builtins.fetchTree pin.locked) (
+        {
+          config = importConfig;
+        }
+        // (
+          if prev.stdenv.buildPlatform.system == prev.stdenv.hostPlatform.system then
+            { inherit (prev.stdenv.hostPlatform) system; }
+          else
+            {
+              localSystem = prev.stdenv.buildPlatform.system;
+              crossSystem = prev.stdenv.hostPlatform.system;
+            }
+        )
+      );
     }) (builtins.attrValues set)
   );
 in

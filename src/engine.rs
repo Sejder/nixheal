@@ -1,6 +1,7 @@
 use crate::config::Target;
 use crate::date;
 use crate::graph::{Ascent, Graph};
+use crate::guard;
 use crate::lock::Lock;
 use crate::log;
 use crate::logparse::{self, Failure};
@@ -27,11 +28,13 @@ pub struct Engine {
     pub last_good: HashMap<Target, Lock>,
     pub targets: Vec<Target>,
     /// The machine nixheal runs on, when it is one of the targets and must not
-    /// be held. Its failure aborts the run instead of holding it.
-    pub local: Option<Target>,
+    /// be held: its failure aborts the run instead of holding it.
+    pub guarded: Option<Target>,
     /// The machine nixheal runs on, when it is one of the targets.
-    pub local_target: Option<Target>,
-    pub fallback_inputs: Vec<String>,
+    pub local: Option<Target>,
+    /// Where pins.json sits in the flake's source tree: "pins.json", or
+    /// "dir/pins.json" for a flake in a subdirectory of its repository.
+    pub pins_rel: String,
     pub deny: Vec<String>,
     pub system: String,
     pub max_rounds: u32,
@@ -168,7 +171,10 @@ impl Engine {
         entry.lock_sha256 = self.new_lock.sha256();
         entry.lock_last_modified = self.new_lock.last_modified();
 
-        let inputs = self.probe(target)?;
+        let (inputs, status) = match self.probe(target)? {
+            Ok(sets) => (sets, Status::Active),
+            Err(why) => (Vec::new(), Status::Failed(why)),
+        };
         let old_lock = self.last_good.get(target).unwrap_or(&self.old_lock).clone();
 
         Ok(State {
@@ -182,24 +188,34 @@ impl Engine {
             inputs,
             drv: None,
             system: std::cell::OnceCell::new(),
-            status: Status::Active,
+            status,
             new_pins: 0,
         })
     }
 
     /// Check that the target applies the pins nixheal writes for it, and return
-    /// its package sets. A mismatch here would make every pin silently do
-    /// nothing, so it stops the run.
-    fn probe(&self, target: &Target) -> Result<Vec<String>> {
+    /// its package sets. A nixheal setting that would make every pin silently
+    /// do nothing stops the run. A configuration that does not evaluate at all,
+    /// such as one setting an option the update removed, is that target's
+    /// problem: it comes back as the reason to hold it.
+    fn probe(&self, target: &Target) -> Result<Result<Vec<String>, String>> {
         let apply = "c: { enable = c.enable or false; name = c.name or \"\"; \
                      pins = if (c.pinsFile or null) == null then null else toString c.pinsFile; \
                      sets = builtins.attrNames (c.packageSets or { }); }";
         let probe: Probe = match self.nix.eval_apply(&target.nixheal_config(), apply) {
             Ok(v) => serde_json::from_value(v)?,
-            Err(e) => bail!(
-                "cannot read programs.nixheal of {target}; is the nixheal module imported there?\n{}",
-                e.to_string().lines().last().unwrap_or_default()
-            ),
+            Err(e) => {
+                let text = e.to_string();
+                if text.contains("attribute 'nixheal' missing")
+                    || text.contains("attribute 'programs' missing")
+                {
+                    bail!("{target} has no programs.nixheal; import the nixheal module there");
+                }
+                return Ok(Err(format!(
+                    "its configuration does not evaluate: {}",
+                    logparse::headline(&text)
+                )));
+            }
         };
         if !probe.enable {
             bail!("programs.nixheal.enable is off in {target}, so its pins would not be applied");
@@ -213,17 +229,21 @@ impl Engine {
         }
         match probe.pins.as_deref().map(flake_relative) {
             None => bail!("programs.nixheal.pinsFile is not set in {target}"),
-            Some(Some(rel)) if rel == "pins.json" => {}
+            Some(Some(rel)) if rel == self.pins_rel => {}
             Some(rel) => bail!(
-                "{target} has programs.nixheal.pinsFile = {}; it must be pins.json at the flake root, where nixheal writes it",
-                rel.unwrap_or_else(|| probe.pins.clone().unwrap_or_default())
+                "{target} has programs.nixheal.pinsFile = {}; it must be {}, the pins.json next to flake.lock, where nixheal writes it",
+                rel.unwrap_or_else(|| probe.pins.clone().unwrap_or_default()),
+                self.pins_rel
             ),
         }
-        Ok(if probe.sets.is_empty() {
-            self.fallback_inputs.clone()
-        } else {
-            probe.sets
-        })
+        for set in &probe.sets {
+            if self.new_lock.locked(set).is_none() {
+                log::warn(&format!(
+                    "{target}: package set {set} is not an input of flake.lock, so its packages cannot be pinned"
+                ));
+            }
+        }
+        Ok(Ok(probe.sets))
     }
 
     /// The pins file as the builds should see it: working entries for active
@@ -239,7 +259,7 @@ impl Engine {
                 _ => file.set(st.target.kind, &st.target.name, st.entry.clone()),
             }
         }
-        file.save(&self.pins_path)
+        guard::critical(|| file.save(&self.pins_path))
     }
 
     fn round(&self, states: &mut [State], active: &[usize]) -> Result<()> {
@@ -258,12 +278,25 @@ impl Engine {
             }
         }
         let drvs: Vec<String> = built.iter().map(|(_, d)| d.clone()).collect();
-        let outcome = if drvs.is_empty() {
+        let mut outcome = if drvs.is_empty() {
             None
         } else {
             Some(self.nix.build_drvs(&drvs, &mut monitor)?)
         };
         monitor.finish();
+
+        // A download or a builder killed by a signal may have failed for the
+        // moment only (the network, memory); one retry tells that apart from
+        // a real breakage before anything is pinned or the run stops.
+        if let Some(first) = &outcome
+            && !first.success
+            && self.looks_transient(&first.errors, &drvs)?
+        {
+            log::info("a download or a killed builder failed; building once more before deciding");
+            let mut monitor = Monitor::start();
+            outcome = Some(self.nix.build_drvs(&drvs, &mut monitor)?);
+            monitor.finish();
+        }
 
         if let Some(outcome) = outcome {
             if outcome.success {
@@ -289,13 +322,25 @@ impl Engine {
                 let failed = build_failures(&outcome.errors);
                 let not_built = logparse::failed_drvs(&outcome.errors);
                 let graph = self.nix.show_drvs(&drvs)?;
+                // nix failed without naming a derivation (the daemon went away,
+                // the store is full): nothing can be said about any host.
+                let unattributed = not_built.is_empty();
+                let why = outcome
+                    .errors
+                    .last()
+                    .map(|m| logparse::headline(m))
+                    .unwrap_or_else(|| "no error message".into());
                 for (i, top) in &built {
                     let closure = graph.closure(top);
                     let mine: Vec<&String> =
                         failed.iter().filter(|d| closure.contains(*d)).collect();
                     let st = &mut states[*i];
                     let own_build_failed = closure.iter().any(|d| not_built.contains(d));
-                    if mine.is_empty() && own_build_failed {
+                    if unattributed {
+                        st.status = Status::Failed(format!(
+                            "the build failed without naming a derivation: {why}"
+                        ));
+                    } else if mine.is_empty() && own_build_failed {
                         st.status = Status::Failed(
                             "the build failed without a failure nixheal recognises".into(),
                         );
@@ -312,7 +357,17 @@ impl Engine {
 
         for (i, msgs) in eval_failed {
             let st = &mut states[i];
-            let attrs: Vec<String> = logparse::parse(&msgs)
+            let parsed = logparse::parse(&msgs);
+            if let Some((attr, reason)) = parsed.iter().find_map(|f| match f {
+                Failure::Refused { attr, reason } => Some((attr, reason)),
+                _ => None,
+            }) {
+                st.status = Status::Failed(format!(
+                    "nixpkgs refuses {attr} because {reason}; nixheal does not pin around that, so allow it or stop using it"
+                ));
+                continue;
+            }
+            let attrs: Vec<String> = parsed
                 .into_iter()
                 .filter_map(|f| match f {
                     Failure::Eval { attr } => Some(attr),
@@ -367,6 +422,33 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Whether a failed build may have failed only for the moment: a builder
+    /// killed by a signal, or a download (a fixed-output derivation) whose
+    /// builder failed.
+    fn looks_transient(&self, errors: &[String], drvs: &[String]) -> Result<bool> {
+        let parsed = logparse::parse(errors);
+        if parsed
+            .iter()
+            .any(|f| matches!(f, Failure::Infra { reason, .. } if reason.contains("due to signal")))
+        {
+            return Ok(true);
+        }
+        let failed: Vec<&String> = parsed
+            .iter()
+            .filter_map(|f| match f {
+                Failure::Build { drv } => Some(drv),
+                _ => None,
+            })
+            .collect();
+        if failed.is_empty() || errors.iter().any(|m| m.contains("hash mismatch")) {
+            return Ok(false);
+        }
+        let graph = self.nix.show_drvs(drvs)?;
+        Ok(failed
+            .iter()
+            .any(|d| graph.nodes.get(d.as_str()).is_some_and(|n| n.fixed_output)))
     }
 
     fn build_wanted(
@@ -564,7 +646,7 @@ impl Engine {
     fn finish(&self, original: PinsFile, states: Vec<State>) -> Result<Report> {
         let mut report = Report::default();
         let local_failure = states.iter().find_map(|st| match &st.status {
-            Status::Failed(reason) if Some(&st.target) == self.local.as_ref() => {
+            Status::Failed(reason) if Some(&st.target) == self.guarded.as_ref() => {
                 Some(reason.clone())
             }
             _ => None,
@@ -572,7 +654,7 @@ impl Engine {
         if let Some(reason) = local_failure {
             log::change(&format!(
                 "giving up on {}: {reason}",
-                st_name(self.local.as_ref())
+                st_name(self.guarded.as_ref())
             ));
             report.local_failure = Some(reason);
             return Ok(report);
@@ -613,10 +695,14 @@ impl Engine {
                     log::info(&format!("{target} builds"));
                 }
                 Status::Failed(reason) => {
-                    if Some(&target) == self.local_target.as_ref() {
+                    if Some(&target) == self.local.as_ref() {
                         report.local_held = true;
                     }
-                    let mut entry = st.base.unwrap_or_default();
+                    let mut entry = st.base.unwrap_or_else(|| Entry {
+                        lock_sha256: st.old_lock.sha256(),
+                        lock_last_modified: st.old_lock.last_modified(),
+                        ..Default::default()
+                    });
                     let held = match st.held_before {
                         Some(mut h) => {
                             h.reason = reason.clone();
@@ -641,7 +727,7 @@ impl Engine {
                 Status::Active => unreachable!("active targets are failed before finishing"),
             }
         }
-        file.save(&self.pins_path)?;
+        guard::critical(|| file.save(&self.pins_path))?;
         Ok(report)
     }
 
