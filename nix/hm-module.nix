@@ -43,6 +43,7 @@ let
   ) cfg.nixpkgs;
 
   runsNixheal = !inNixos && (cfg.hosts != [ ] || cfg.homes != [ ]);
+  upCommit = if cfg.autoUpgrade.commit == null then cfg.commit else cfg.autoUpgrade.commit;
   hmNixpkgsConfig =
     let
       c = config.nixpkgs.config or null;
@@ -118,6 +119,7 @@ in
           warnAfterDays
           deny
           quiet
+          commit
           switcher
           input
           ;
@@ -157,7 +159,7 @@ in
               (lib.getExe cfg.package)
               "switch"
             ]
-            ++ lib.optional (!cfg.autoUpgrade.commit) "--no-commit"
+            ++ [ (if upCommit then "--commit" else "--no-commit") ]
             ++ [ "--update" ]
             ++ cfg.autoUpgrade.inputs
           );

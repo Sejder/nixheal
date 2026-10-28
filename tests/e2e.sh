@@ -85,14 +85,14 @@ write_config() {
   [ -n "${3:-}" ] && hosts="$3"
   cat >"$config" <<EOF
 { "kind": "nixos", "self": "a", "flake": "$sys", "hosts": [$hosts], "homes": [],
-  "warnAfterDays": 14, "deny": [$1]${2:+, $2} }
+  "warnAfterDays": 14, "commit": ${COMMIT:-true}, "deny": [$1]${2:+, $2} }
 EOF
 }
 
 write_home_config() {
   cat >"$config" <<EOF
 { "kind": "home", "self": "alice", "flake": "$sys", "hosts": [], "homes": ["alice"],
-  "warnAfterDays": 14, "deny": [] }
+  "warnAfterDays": 14, "commit": true, "deny": [] }
 EOF
 }
 
@@ -582,6 +582,21 @@ git -C "$sys" checkout -q -- flake.lock pins.json
 revision fixed false 20 ok
 write_config ""
 nixheal_ build --update || fail "nixheal build gave up after the --old-lock revision"
+
+step "commits are off unless asked for: a config without commit leaves the files, --commit commits"
+COMMIT=false write_config ""
+revision fixed false 21 ok
+before_commits="$(commits)"
+nixheal_ build --update || fail "the build without commit gave up"
+[ "$(commits)" = "$before_commits" ] || fail "a run without commit committed"
+expect_log "left flake.lock and pins.json uncommitted (pass --commit"
+git -C "$sys" diff --quiet -- flake.lock && fail "flake.lock was not updated"
+nixheal_ build --commit || fail "the build with --commit gave up"
+[ "$(commits)" -gt "$before_commits" ] || fail "--commit did not commit"
+nixheal_ build --update --commit --no-commit || fail "the build with --commit --no-commit gave up"
+expect_log "left flake.lock and pins.json uncommitted"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
 
 step "a host that is not in the flake is refused before anything builds"
 write_config "" "" '"a", "bb"'

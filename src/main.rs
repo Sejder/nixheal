@@ -37,17 +37,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Pin and unpin until every configured host and home builds, then commit.
+    /// Pin and unpin until every configured host and home builds.
     Build {
         #[command(flatten)]
         build: cmd::BuildArgs,
     },
-    /// Build and commit, then switch this machine's own host or home.
+    /// Build, then switch this machine's own host or home.
     Switch {
         #[command(flatten)]
         build: cmd::BuildArgs,
     },
-    /// Build and commit, then make this machine's own host boot into it.
+    /// Build, then make this machine's own host boot into it.
     Boot {
         #[command(flatten)]
         build: cmd::BuildArgs,
@@ -75,7 +75,7 @@ enum Command {
         attr: String,
     },
     /// Pin a package by hand at the current lock; it stays until cleared.
-    /// Applied and committed by the next build, switch or boot.
+    /// Applied by the next build, switch or boot.
     Pin {
         #[command(flatten)]
         pick: cmd::Pick,

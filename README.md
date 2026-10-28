@@ -24,7 +24,7 @@ nixheal: the errors above were handled: pinned 1 package(s), building again
 nixheal: round 2: evaluating and building host laptop with 1 pin(s)
 nixheal: host laptop: nixpkgs.sbctl pinned today
 nixheal: host laptop builds
-nixheal: done: 1 built, 1 pinned; committed 3f2a9c1 "nixheal: update flake.lock"
+nixheal: done: 1 built, 1 pinned; left flake.lock and pins.json uncommitted (pass --commit, or set programs.nixheal.commit)
 nixheal: switch host laptop with nh
 ...
 $ nixheal switch --update          # a few days later, sbctl is fixed upstream
@@ -79,9 +79,11 @@ nixheal switch --update
 ```
 
 That updates the flake inputs, builds `nixosConfigurations.laptop` (pinning and
-unpinning as needed), commits `flake.lock` and `pins.json`, and switches. Use
-`nixheal boot --update` to activate on the next boot, or `nixheal build --update`
-to only build and commit.
+unpinning as needed) and switches, leaving `flake.lock` and `pins.json` changed
+in the checkout for you to commit. Pass `--commit`, or set
+`programs.nixheal.commit = true`, to have nixheal commit exactly those two
+files after each run. Use `nixheal boot --update` to activate on the next
+boot, or `nixheal build --update` to only build.
 
 To have it run on its own, replace `system.autoUpgrade` with:
 
@@ -202,7 +204,8 @@ Options of `build`, `switch` and `boot`:
 |---|---|
 | `--update [INPUT...]` | run `nix flake update` first, for all inputs or the named ones (an unknown name is an error) |
 | `--dry-run` | evaluate and build as usual and show what would be pinned and unpinned (marked `(dry run)`), then leave every file as it was |
-| `--no-commit` | leave `flake.lock` and `pins.json` uncommitted |
+| `--commit` | commit `flake.lock` and `pins.json` after the run (the default with `programs.nixheal.commit = true`) |
+| `--no-commit` | leave them uncommitted, whatever `programs.nixheal.commit` says (the default otherwise) |
 | `--only NAME` | build only some of the configured hosts and homes; repeatable |
 | `--hold-local` | hold this machine's own host like any other instead of giving up; for a machine that builds a fleet |
 | `--gc-roots DIR` | keep every system that built alive under `DIR/nixheal-host-<host>` and `DIR/nixheal-home-<name>`, e.g. for a binary cache; without `--only`, nixheal's roots of targets no longer configured are removed, and nothing else in `DIR` is touched |
@@ -213,8 +216,8 @@ Options of `build`, `switch` and `boot`:
 | `--system SYSTEM` | the system for eval checks when a target's own cannot be evaluated |
 | `-q`, `--quiet` | print only pins, unpins, holds, warnings and errors; nix's error messages are shown only when nixheal could not handle them |
 
-nixheal works in a dirty tree and only ever commits `flake.lock` and
-`pins.json`, without running git hooks or signing. A run takes a lock on the
+nixheal works in a dirty tree. When it commits, it commits only `flake.lock`
+and `pins.json`, without running git hooks or signing. A run takes a lock on the
 flake (also taken by `pin`, `clear` and `merge`), so a timer run and a manual
 run cannot overlap, and Ctrl-C or SIGTERM puts both files back. A flake path
 containing `#` or `?` is refused, since nix would read those as part of a
@@ -248,6 +251,7 @@ The settings come from `$NIXHEAL_CONFIG`, then `~/.config/nixheal.json`
 | `warnAfterDays` | `14` | report a pin or hold as stale, and log it as a warning, after this many days |
 | `deny` | `[ ]` | attributes never to pin, on top of the built-in list; `cuda*` matches a prefix |
 | `quiet` | `false` | always run as `--quiet` |
+| `commit` | `false` | commit `flake.lock` and `pins.json` after each run, as with `--commit` |
 | `package` | this flake's | the nixheal package |
 | `nixpkgs.<input>` | `{ }` | another nixpkgs to import with pins applied: `source`, `config` (default: this host's `nixpkgs.config`), `argName` |
 | `packageSets` | read-only | every package set nixheal pins on this machine, keyed by input |
@@ -255,7 +259,7 @@ The settings come from `$NIXHEAL_CONFIG`, then `~/.config/nixheal.json`
 | `autoUpgrade.dates` | `"04:40"` | systemd calendar expression |
 | `autoUpgrade.randomizedDelaySec` | `"45min"` | |
 | `autoUpgrade.inputs` | `[ ]` | inputs to update; all when empty |
-| `autoUpgrade.commit` | `true` | commit after each run |
+| `autoUpgrade.commit` | `null` | commit after each timer run; `null` follows `commit` |
 | `autoUpgrade.operation` | `"switch"` | NixOS only: `"switch"` or `"boot"` |
 | `autoUpgrade.user` | (required) | NixOS only: the owner of the checkout, who updates, builds and commits |
 | `autoUpgrade.onFailure` | `[ ]` | units to start when a run fails |

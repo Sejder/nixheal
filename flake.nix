@@ -297,8 +297,9 @@
             assert settings.kind == "nixos";
             assert settings.quiet == false;
             assert settings.switcher == "nh";
+            assert settings.commit == false;
             assert upgrade.serviceConfig.User == "alice";
-            assert builtins.match ".*nixheal build --built-link /run/nixheal/system --update nixpkgs" upgrade.serviceConfig.ExecStart != null;
+            assert builtins.match ".*nixheal build --built-link /run/nixheal/system --no-commit --update nixpkgs" upgrade.serviceConfig.ExecStart != null;
             assert builtins.match "[+]/nix/store/.*-nixheal-activate" upgrade.serviceConfig.ExecStartPost != null;
             assert machine.config.systemd.timers.nixheal-upgrade.timerConfig.OnCalendar == "04:40";
             assert !(settings ? inputs);
@@ -341,7 +342,7 @@
             assert homeSettings.homes == [ "alice" ];
             assert builtins.length home.config.nixpkgs.overlays == 1;
             assert home.config.programs.nixheal.packageSets ? nixpkgs;
-            assert builtins.match ".*nixheal switch --update" homeUpgrade.Service.ExecStart != null;
+            assert builtins.match ".*nixheal switch --no-commit --update" homeUpgrade.Service.ExecStart != null;
             assert !(homeUpgrade.Unit ? After);
             assert homeUpgrade.Unit.X-SwitchMethod == "keep-old";
             assert home.config.systemd.user.timers.nixheal-upgrade.Timer.OnCalendar == "04:40";

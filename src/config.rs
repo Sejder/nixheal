@@ -27,6 +27,9 @@ pub struct Config {
     pub deny: Vec<String>,
     #[serde(default)]
     pub quiet: bool,
+    /// Commit flake.lock and pins.json after a run, as --commit does.
+    #[serde(default)]
+    pub commit: bool,
     /// How to activate: "nh" (the default) or "native", which is
     /// nixos-rebuild for hosts and home-manager for homes.
     #[serde(default = "default_switcher")]

@@ -113,9 +113,9 @@ in
       description = "Flake inputs to update; all of them when empty.";
     };
     commit = mkOption {
-      type = types.bool;
-      default = true;
-      description = "Commit flake.lock and pins.json after each run.";
+      type = types.nullOr types.bool;
+      default = null;
+      description = "Commit flake.lock and pins.json after each timer run; null follows programs.nixheal.commit.";
     };
     onFailure = mkOption {
       type = types.listOf types.str;
@@ -128,6 +128,11 @@ in
     type = types.bool;
     default = false;
     description = "Only report pins, unpins, holds, warnings and errors, as with --quiet.";
+  };
+  commit = mkOption {
+    type = types.bool;
+    default = false;
+    description = "Commit flake.lock and pins.json after each build, switch or boot, as with --commit.";
   };
   nixpkgs = mkOption {
     type = types.attrsOf nixpkgsSet;

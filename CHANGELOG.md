@@ -4,6 +4,13 @@
 
 Fixes from the second and third independent reviews of 0.1.1.
 
+Breaking: nixheal no longer commits by default. `build`, `switch` and `boot`
+leave `flake.lock` and `pins.json` changed in the checkout unless given
+`--commit` or `programs.nixheal.commit = true`; `--no-commit` still turns it
+off. `autoUpgrade.commit` defaults to `null`, which follows
+`programs.nixheal.commit`, so a timer that should keep committing needs one of
+the two set.
+
 Failures:
 
 - A configuration that no longer evaluates, such as one using a removed NixOS

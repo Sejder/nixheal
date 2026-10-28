@@ -50,6 +50,7 @@ let
   ];
 
   up = cfg.autoUpgrade;
+  upCommit = if up.commit == null then cfg.commit else up.commit;
   builtLink = "/run/nixheal/system";
   activateScript = pkgs.writeShellScript "nixheal-activate" ''
     set -eu
@@ -151,6 +152,7 @@ in
           warnAfterDays
           deny
           quiet
+          commit
           switcher
           input
           ;
@@ -210,7 +212,7 @@ in
               "--built-link"
               builtLink
             ]
-            ++ lib.optional (!up.commit) "--no-commit"
+            ++ [ (if upCommit then "--commit" else "--no-commit") ]
             ++ [ "--update" ]
             ++ up.inputs
           );

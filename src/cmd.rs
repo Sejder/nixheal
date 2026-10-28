@@ -49,8 +49,13 @@ pub struct BuildArgs {
     /// unpinned, then restore flake.lock and pins.json.
     #[arg(long)]
     pub dry_run: bool,
-    /// Leave flake.lock and pins.json uncommitted.
-    #[arg(long)]
+    /// Commit flake.lock and pins.json after the run; the default when
+    /// programs.nixheal.commit is set.
+    #[arg(long, overrides_with = "no_commit")]
+    pub commit: bool,
+    /// Leave flake.lock and pins.json uncommitted, whatever
+    /// programs.nixheal.commit says; the default otherwise.
+    #[arg(long, overrides_with = "commit")]
     pub no_commit: bool,
     /// Hold the machine's own host like any other when it cannot be fixed,
     /// instead of giving up; for a machine that builds a fleet.
@@ -550,7 +555,7 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
 
     // From here the run's results stand or fall together: any error before
     // the commit puts flake.lock and pins.json back.
-    let settled = (|| -> Result<Option<String>> {
+    let settled = (|| -> Result<String> {
         if let Some(dir) = &args.gc_roots {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             for (target, drv) in &report.built {
@@ -566,8 +571,12 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
             ));
         }
         guard::settle(|| {
-            if args.no_commit {
-                return Ok(Some("left uncommitted (--no-commit)".into()));
+            let commit = (cfg.commit || args.commit) && !args.no_commit;
+            if !commit {
+                return Ok(
+                    "left flake.lock and pins.json uncommitted (pass --commit, or set programs.nixheal.commit)"
+                        .into(),
+                );
             }
             if let Some(git) = &git {
                 let title = if update.is_some() {
@@ -581,14 +590,14 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
                     message.push_str(&report.changes.join("\n"));
                 }
                 if git.commit(&[&lock_path, &pins_path], &message)? {
-                    return Ok(Some(match git.head() {
+                    return Ok(match git.head() {
                         Some(h) => format!("committed {h} {title:?}"),
                         None => format!("committed {title:?}"),
-                    }));
+                    });
                 }
-                return Ok(Some("nothing to commit".into()));
+                return Ok("nothing to commit".into());
             }
-            Ok(None)
+            Ok("the flake is not in a git repository, so nothing was committed".into())
         })
     })();
     let committed = match settled {
@@ -599,10 +608,10 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         }
     };
     log::info(&format!(
-        "done: {} built, {}{}",
+        "done: {} built, {}; {}",
         report.built.len(),
         tally(&report.changes),
-        committed.map(|c| format!("; {c}")).unwrap_or_default()
+        committed
     ));
 
     // Only now, with the results kept, are these locks known to build.
@@ -688,7 +697,7 @@ pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
         other.display(),
         pins_path.display(),
         if taken > 0 {
-            "; the next build commits it"
+            "; the next build applies it"
         } else {
             ""
         }
@@ -898,7 +907,7 @@ pub fn pin(at: &Where, pick: &Pick, attr: &str, input: Option<&str>) -> Result<E
     );
     file.save(&pins_path)?;
     log::change(&format!(
-        "pinned {target}: {input}.{attr} at {at_rev} by hand; it stays until 'nixheal clear {attr}{}'. The next build, switch or boot applies and commits it",
+        "pinned {target}: {input}.{attr} at {at_rev} by hand; it stays until 'nixheal clear {attr}{}'. The next build, switch or boot applies it",
         ctx.flag_for(&target)
     ));
     Ok(ExitCode::SUCCESS)
