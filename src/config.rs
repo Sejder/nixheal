@@ -134,6 +134,8 @@ pub struct Located {
     pub path: PathBuf,
     /// Named by --config or $NIXHEAL_CONFIG, so it must work.
     pub explicit: bool,
+    /// Where the path came from, for error messages.
+    pub from: &'static str,
 }
 
 pub fn locate(explicit: Option<&Path>) -> Option<Located> {
@@ -141,12 +143,14 @@ pub fn locate(explicit: Option<&Path>) -> Option<Located> {
         return Some(Located {
             path: p.to_path_buf(),
             explicit: true,
+            from: "--config",
         });
     }
     if let Some(p) = std::env::var_os("NIXHEAL_CONFIG") {
         return Some(Located {
             path: PathBuf::from(p),
             explicit: true,
+            from: "$NIXHEAL_CONFIG",
         });
     }
     [user_config(), Some(PathBuf::from("/etc/nixheal.json"))]
@@ -156,6 +160,7 @@ pub fn locate(explicit: Option<&Path>) -> Option<Located> {
         .map(|path| Located {
             path,
             explicit: false,
+            from: "the default locations",
         })
 }
 

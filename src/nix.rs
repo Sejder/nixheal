@@ -76,6 +76,7 @@ impl Monitor {
             .stderr(Stdio::piped())
             .spawn()
             .context("spawning nix")?;
+        crate::guard::track(child.id());
 
         let mut stdout = child.stdout.take().expect("piped stdout");
         let collect = std::thread::spawn(move || {
@@ -110,7 +111,9 @@ impl Monitor {
             }
         }
 
-        let status = child.wait().context("waiting for nix")?;
+        let status = child.wait().context("waiting for nix");
+        crate::guard::untrack(child.id());
+        let status = status?;
         let out = collect.join().expect("stdout reader")?;
         Ok((status, out, errors))
     }
@@ -208,6 +211,20 @@ impl Nix {
             .context("spawning nix eval")?;
         let bytes = checked(&format!("nix eval {attr}"), out)?;
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// The store path of the flake's source as nix copies it now.
+    pub fn source_path(&self) -> Result<String> {
+        let out = command()
+            .args(["flake", "metadata", "--json", &self.flake])
+            .stdin(Stdio::null())
+            .output()
+            .context("spawning nix flake metadata")?;
+        let json: Value = serde_json::from_slice(&checked("nix flake metadata", out)?)?;
+        json["path"]
+            .as_str()
+            .map(str::to_string)
+            .context("nix flake metadata has no path")
     }
 
     /// The full error of evaluating `attr`, with every frame of its trace:

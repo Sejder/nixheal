@@ -11,15 +11,6 @@ struct Item {
     fields: Value,
 }
 
-/// How a target is named in a summary: hosts by name, homes as "home NAME", so
-/// a host and a home with the same name stay apart.
-fn label(target: &Target) -> String {
-    match target.kind {
-        crate::pins::Kind::Nixos => target.name.clone(),
-        crate::pins::Kind::Home => format!("home {}", target.name),
-    }
-}
-
 /// A flat summary of a pins file for dashboards, e.g. a homepage customapi
 /// widget: how much is pinned or held, the oldest of it, and one status word.
 ///
@@ -27,6 +18,7 @@ fn label(target: &Target) -> String {
 /// warn_after_days), HELD, PINNED, OK.
 pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
     let mut pins = 0;
+    let mut pin_entries = 0;
     let mut held = 0;
     let mut items: Vec<Item> = Vec::new();
     for (kind, name, entry) in file.entries() {
@@ -34,7 +26,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
         if let Some(h) = &entry.held {
             held += 1;
             items.push(Item {
-                what: format!("{} held", label(&target)),
+                what: format!("{target} held"),
                 kind: "held",
                 days: date::parse(&h.since).map(|d| today - d),
                 fields: json!({
@@ -45,16 +37,19 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
                 }),
             });
         }
-        for (input, attr, pin) in entry.iter() {
+        for (attr, sets) in entry.packages() {
             pins += 1;
+            pin_entries += sets.len();
+            let pin = sets[0].1;
+            let inputs: Vec<&str> = sets.iter().map(|(i, _)| *i).collect();
             items.push(Item {
-                what: format!("{}: {attr}", label(&target)),
+                what: format!("{target}: {attr}"),
                 kind: pin.reason.as_str(),
                 days: date::parse(&pin.since).map(|d| today - d),
                 fields: json!({
                     "target": name,
                     "target_kind": kind.noun(),
-                    "input": input,
+                    "inputs": inputs,
                     "attr": attr,
                     "since": pin.since,
                 }),
@@ -118,6 +113,7 @@ pub fn summary(file: &PinsFile, today: i64, warn_after_days: i64) -> Value {
     json!({
         "status": status,
         "pins": pins,
+        "pin_entries": pin_entries,
         "held": held,
         "stale": stale,
         "oldest": oldest.map_or("-".to_string(), |i| format!("{}, {}", i.what, age(i))),
@@ -141,6 +137,7 @@ mod tests {
             reason: Reason::Eval,
             failed_drv: None,
             trail: Vec::new(),
+            error: None,
             checked_nar_hash: String::new(),
         }
     }
@@ -172,13 +169,23 @@ mod tests {
         let s = summary(&f, today(), 14);
         assert_eq!(s["status"], "PINNED");
         assert_eq!(s["pins"], 2);
-        assert_eq!(s["oldest"], "home: open-webui, 7d");
+        assert_eq!(s["oldest"], "host home: open-webui, 7d");
         assert_eq!(s["oldest_days"], 7);
-        assert_eq!(s["list"], "home: open-webui (7d), pi: sbctl (1d)");
-        assert_eq!(s["items"][0]["name"], "home: open-webui");
+        assert_eq!(s["list"], "host home: open-webui (7d), host pi: sbctl (1d)");
+        assert_eq!(s["items"][0]["name"], "host home: open-webui");
         assert_eq!(s["items"][0]["label"], "7d, eval");
-        assert_eq!(s["items"][1]["name"], "pi: sbctl");
+        assert_eq!(s["items"][1]["name"], "host pi: sbctl");
         assert_eq!(s["items"].as_array().unwrap().len(), 2);
+
+        f.entry_mut(Kind::Nixos, "pi")
+            .insert("nixpkgs-unstable", "sbctl", pin("2026-10-26"));
+        let s = summary(&f, today(), 14);
+        assert_eq!(s["pins"], 2);
+        assert_eq!(s["pin_entries"], 3);
+        assert_eq!(
+            s["items"][1]["inputs"],
+            json!(["nixpkgs", "nixpkgs-unstable"])
+        );
     }
 
     #[test]
@@ -203,12 +210,12 @@ mod tests {
         assert_eq!(s["oldest"], "home alice: zed-editor, 26d");
         assert_eq!(s["items"][0]["label"], "26d, eval, STALE");
         assert_eq!(s["items"][0]["name"], "home alice: zed-editor");
-        assert_eq!(s["items"][1]["name"], "pi held");
+        assert_eq!(s["items"][1]["name"], "host pi held");
         assert_eq!(s["items"][1]["label"], "2d, held");
         assert_eq!(s["items"][1]["held_reason"], "linux fails");
         assert_eq!(s["items"][0]["target"], "alice");
         assert_eq!(s["items"][0]["target_kind"], "home");
-        assert_eq!(s["items"][0]["input"], "nixpkgs");
+        assert_eq!(s["items"][0]["inputs"][0], "nixpkgs");
         assert_eq!(s["items"][0]["attr"], "zed-editor");
     }
 

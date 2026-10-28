@@ -106,6 +106,11 @@ in
       default = "45min";
       description = "Random delay added to each run.";
     };
+    timeout = mkOption {
+      type = types.str;
+      default = "12h";
+      description = "Stop a run that takes longer than this, e.g. one stuck on a hung download; a systemd time span.";
+    };
     inputs = mkOption {
       type = types.listOf types.str;
       default = [ ];

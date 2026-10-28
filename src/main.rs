@@ -29,6 +29,15 @@ struct Cli {
     /// Only report pins, unpins, holds, warnings and errors.
     #[arg(short, long, global = true, help_heading = "Global options")]
     quiet: bool,
+    /// Report progress even when programs.nixheal.quiet is set.
+    #[arg(
+        short,
+        long,
+        global = true,
+        conflicts_with = "quiet",
+        help_heading = "Global options"
+    )]
+    verbose: bool,
     #[command(flatten)]
     at: cmd::Where,
     #[command(subcommand)]
@@ -51,13 +60,6 @@ enum Command {
     Boot {
         #[command(flatten)]
         build: cmd::BuildArgs,
-    },
-    /// Fold another pins.json into the flake's; per host or home, the entry
-    /// from the newer lock wins.
-    Merge {
-        /// Another pins.json, e.g. one published by a build host.
-        #[arg(value_name = "FILE")]
-        file: std::path::PathBuf,
     },
     /// List the pins and held hosts and homes, with their age.
     Status {
@@ -88,11 +90,15 @@ enum Command {
     },
     /// Remove a pin so the next run builds the package from the current lock,
     /// or release a held host or home with --held.
+    #[command(
+        visible_alias = "unpin",
+        group = clap::ArgGroup::new("what").required(true).args(["attr", "held"])
+    )]
     Clear {
         #[command(flatten)]
         pick: cmd::Pick,
         /// The pinned attribute, e.g. firefox.
-        #[arg(value_name = "ATTR", required_unless_present = "held")]
+        #[arg(value_name = "ATTR")]
         attr: Option<String>,
         /// Only clear the pin in this input; by default every input pinning ATTR.
         #[arg(long, value_name = "INPUT")]
@@ -102,10 +108,18 @@ enum Command {
         #[arg(long, conflicts_with_all = ["attr", "input"])]
         held: bool,
     },
+    /// Fold another pins.json into the flake's; per host or home, the entry
+    /// from the newer lock wins.
+    Merge {
+        /// Another pins.json, e.g. one published by a build host.
+        #[arg(value_name = "FILE")]
+        file: std::path::PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    log::set_verbose(cli.verbose);
     log::set_quiet(cli.quiet);
     let at = &cli.at;
     let result = match &cli.command {

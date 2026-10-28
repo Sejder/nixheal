@@ -26,15 +26,7 @@ let
         {
           config = importConfig;
         }
-        // (
-          if prev.stdenv.buildPlatform.system == prev.stdenv.hostPlatform.system then
-            { inherit (prev.stdenv.hostPlatform) system; }
-          else
-            {
-              localSystem = prev.stdenv.buildPlatform.system;
-              crossSystem = prev.stdenv.hostPlatform.system;
-            }
-        )
+        // import ./platform.nix prev.stdenv.buildPlatform prev.stdenv.hostPlatform
       );
     }) (builtins.attrValues set)
   );

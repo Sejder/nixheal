@@ -5,8 +5,15 @@ static QUIET: AtomicBool = AtomicBool::new(false);
 static DRY_RUN: AtomicBool = AtomicBool::new(false);
 static HELD_BACK: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// --verbose: progress is reported whatever the config's quiet says.
+pub fn set_verbose(verbose: bool) {
+    VERBOSE.store(verbose, Ordering::Relaxed);
+}
+
 pub fn set_quiet(quiet: bool) {
-    if quiet {
+    if quiet && !VERBOSE.load(Ordering::Relaxed) {
         QUIET.store(true, Ordering::Relaxed);
     }
 }

@@ -89,6 +89,13 @@
             hello = "new";
             cowsay = "new";
           };
+          onReal =
+            p:
+            self.lib.mkOverlay {
+              inherit pins;
+              name = "test";
+              input = "nixpkgs";
+            } p p;
           overlay =
             args:
             self.lib.mkOverlay (
@@ -287,6 +294,10 @@
                 nixpkgsConfig = { };
               } prev prev).hello.drvPath
               == pkgs.hello.drvPath;
+            assert (onReal pkgs).hello.drvPath == pkgs.hello.drvPath;
+            assert (onReal pkgs.pkgsStatic).hello.drvPath == pkgs.pkgsStatic.hello.drvPath;
+            assert
+              (onReal pkgs.pkgsCross.riscv64).hello.drvPath == pkgs.pkgsCross.riscv64.hello.drvPath;
             pkgs.runCommand "nixheal-overlay-check" { } "touch $out";
           module =
             assert machine.pkgs.hello.pname == "hello";
@@ -308,6 +319,7 @@
             assert upgrade.environment.NIXHEAL_CONFIG == "/etc/nixheal.json";
             assert upgrade.unitConfig.OnFailure == [ ];
             assert upgrade.unitConfig.X-StopOnRemoval == false;
+            assert upgrade.serviceConfig.TimeoutStartSec == "12h";
             assert upgrade.restartIfChanged == false;
             assert builtins.any (p: (p.pname or "") == "nh") machine.config.environment.systemPackages;
             assert probe.enable && probe.name == "test";

@@ -51,7 +51,20 @@ pub struct Pin {
     /// Derivation names from the failed drv up to the pinned package.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trail: Vec<String>,
+    /// For an evaluation failure, what nix said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub checked_nar_hash: String,
+}
+
+impl Pin {
+    /// Whether two pins came from one failure: the same package failing the
+    /// same way, pinned in several package sets that provide it.
+    pub fn same_failure(&self, other: &Pin) -> bool {
+        self.reason != Reason::Manual
+            && self.reason == other.reason
+            && self.failed_drv == other.failed_drv
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,8 +126,26 @@ impl Entry {
         })
     }
 
-    pub fn len(&self) -> usize {
-        self.pins.values().map(BTreeMap::len).sum()
+    /// The pins grouped by package: one package pinned in several package
+    /// sets is one entry here, with every input it is pinned in.
+    pub fn packages(&self) -> BTreeMap<&str, Vec<(&str, &Pin)>> {
+        let mut out: BTreeMap<&str, Vec<(&str, &Pin)>> = BTreeMap::new();
+        for (input, attr, pin) in self.iter() {
+            out.entry(attr).or_default().push((input, pin));
+        }
+        out
+    }
+
+    /// The inputs whose pin of `attr` came from the same failure as the one
+    /// in `input`, `input` included: they are retried and released together.
+    pub fn same_failure(&self, input: &str, attr: &str) -> Vec<String> {
+        let Some(pin) = self.get(input, attr) else {
+            return Vec::new();
+        };
+        self.iter()
+            .filter(|(i, a, p)| *a == attr && (*i == input || pin.same_failure(p)))
+            .map(|(i, _, _)| i.to_string())
+            .collect()
     }
 }
 
@@ -201,13 +232,19 @@ impl PinsFile {
 
     /// Put `entry` in place unless the file already holds one computed from a
     /// newer lock: how `nixheal merge` combines two files, e.g. a fleet's
-    /// published pins with a checkout's. Returns whether the entry was taken.
-    pub fn merge(&mut self, kind: Kind, name: &str, entry: Entry) -> bool {
+    /// published pins with a checkout's. Pins made by hand here that the
+    /// incoming entry lacks are kept. Returns whether the entry was taken.
+    pub fn merge(&mut self, kind: Kind, name: &str, mut entry: Entry) -> bool {
         let section = self.section_mut(kind);
-        if let Some(existing) = section.get(name)
-            && existing.lock_last_modified > entry.lock_last_modified
-        {
-            return false;
+        if let Some(existing) = section.get(name) {
+            if existing.lock_last_modified > entry.lock_last_modified {
+                return false;
+            }
+            for (input, attr, pin) in existing.iter() {
+                if pin.reason == Reason::Manual && entry.get(input, attr).is_none() {
+                    entry.insert(input, attr, pin.clone());
+                }
+            }
         }
         section.insert(name.to_string(), entry);
         true
@@ -281,6 +318,7 @@ mod tests {
             reason: Reason::Build,
             failed_drv: Some("/nix/store/aaa-libfoo-1.2.drv".into()),
             trail: vec!["libfoo-1.2".into(), "obs-studio-31".into()],
+            error: None,
             checked_nar_hash: "sha256-Y".into(),
         }
     }
@@ -311,7 +349,7 @@ mod tests {
         assert!(text.find("\"nixpkgs\"").unwrap() < text.find("\"nixpkgs-unstable\"").unwrap());
         assert!(text.contains("\"checkedNarHash\""));
         assert!(text.contains("\"lockLastModified\""));
-        assert_eq!(f.entry(Kind::Nixos, "laptop").unwrap().len(), 2);
+        assert_eq!(f.entry(Kind::Nixos, "laptop").unwrap().iter().count(), 2);
     }
 
     #[test]
@@ -374,6 +412,42 @@ mod tests {
             0o600
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn merge_keeps_manual_pins_made_here() {
+        let mut f = PinsFile::default();
+        let mut mine = entry(5);
+        let mut manual = pin("2026-10-01");
+        manual.reason = Reason::Manual;
+        mine.insert("nixpkgs", "hello", manual);
+        mine.insert("nixpkgs", "obs-studio", pin("2026-10-01"));
+        f.set(Kind::Nixos, "laptop", mine);
+        assert!(f.merge(Kind::Nixos, "laptop", entry(9)));
+        let e = f.entry(Kind::Nixos, "laptop").unwrap();
+        assert_eq!(e.get("nixpkgs", "hello").unwrap().reason, Reason::Manual);
+        assert!(e.get("nixpkgs", "obs-studio").is_none());
+        assert_eq!(e.lock_last_modified, 9);
+    }
+
+    #[test]
+    fn one_failure_in_several_sets_is_one_package() {
+        let mut e = entry(1);
+        e.insert("nixpkgs", "cloudflared", pin("2026-10-28"));
+        e.insert("nixpkgs-unstable", "cloudflared", pin("2026-10-28"));
+        let mut other = pin("2026-10-28");
+        other.failed_drv = Some("/nix/store/bbb-other.drv".into());
+        e.insert("nixpkgs-small", "cloudflared", other);
+        assert_eq!(e.packages().len(), 1);
+        assert_eq!(e.packages()["cloudflared"].len(), 3);
+        assert_eq!(
+            e.same_failure("nixpkgs", "cloudflared"),
+            ["nixpkgs", "nixpkgs-unstable"]
+        );
+        assert_eq!(
+            e.same_failure("nixpkgs-small", "cloudflared"),
+            ["nixpkgs-small"]
+        );
     }
 
     #[test]

@@ -54,6 +54,8 @@ pub struct Report {
     pub built: Vec<(Target, String)>,
     /// The machine's own target was held (only possible with --hold-local).
     pub local_held: bool,
+    /// How many targets are held after the run.
+    pub held: usize,
 }
 
 /// What a target's own programs.nixheal says, read before anything builds.
@@ -72,12 +74,16 @@ enum Status {
     Failed(String),
 }
 
+/// One failure to pin around: a package, as every package set that provides
+/// it names it. The members are pinned, retried and reported together.
 struct Wanted {
-    input: String,
-    attr: String,
+    members: Vec<(String, String)>,
     reason: Reason,
     failed_drv: Option<String>,
+    /// What failed, for messages: the failed derivation's name, or the error.
+    cause: String,
     trail: Vec<String>,
+    error: Option<String>,
 }
 
 struct State {
@@ -90,17 +96,12 @@ struct State {
     retrying: BTreeMap<(String, String), Pin>,
     inputs: Vec<String>,
     drv: Option<String>,
-    /// The pins file the builds saw in the round this target built in.
-    built_with: Option<Vec<u8>>,
+    /// The pins file the builds saw in the round this target built in, and
+    /// the flake's source path in that round.
+    built_with: Option<(Vec<u8>, Option<String>)>,
     system: std::cell::OnceCell<String>,
     status: Status,
     new_pins: usize,
-}
-
-impl State {
-    fn key(&self, input: &str, attr: &str) -> String {
-        format!("{}: {input}.{attr}", self.target)
-    }
 }
 
 impl Engine {
@@ -125,19 +126,26 @@ impl Engine {
                 .iter()
                 .map(|&i| states[i].target.to_string())
                 .collect();
-            let pins: usize = active.iter().map(|&i| states[i].entry.len()).sum();
+            let pins: usize = active
+                .iter()
+                .map(|&i| states[i].entry.packages().len())
+                .sum();
             log::info(&format!(
-                "round {round}: evaluating and building {} with {pins} pin(s)",
+                "round {round}: evaluating and building {} with {pins} pinned package(s)",
                 names.join(", ")
             ));
             let started = std::time::Instant::now();
-            let pins_before = pins;
+            let new_before: usize = active.iter().map(|&i| states[i].new_pins).sum();
             self.round(&mut states, &active)?;
-            for &i in &active {
-                if states[i].status == Status::Done {
-                    states[i].built_with = Some(written.clone());
+            if active.iter().any(|&i| states[i].status == Status::Done) {
+                let source = self.nix.source_path().ok();
+                for &i in &active {
+                    if states[i].status == Status::Done {
+                        states[i].built_with = Some((written.clone(), source.clone()));
+                    }
                 }
             }
+            let new_after: usize = active.iter().map(|&i| states[i].new_pins).sum();
             if active
                 .iter()
                 .any(|&i| matches!(states[i].status, Status::Failed(_)))
@@ -145,13 +153,12 @@ impl Engine {
                 log::flush_nix_errors();
             } else {
                 log::discard_nix_errors();
-            }
-            let pins_after: usize = active.iter().map(|&i| states[i].entry.len()).sum();
-            if pins_after > pins_before {
-                log::info(&format!(
-                    "the errors above were handled: pinned {} package(s), building again",
-                    pins_after - pins_before
-                ));
+                if new_after > new_before {
+                    log::info(&format!(
+                        "the errors above were handled: pinned {} package(s), building again",
+                        new_after - new_before
+                    ));
+                }
             }
             let took = started.elapsed().as_secs();
             if took >= 5 {
@@ -221,19 +228,31 @@ impl Engine {
             .map(|h| Lock::from_json(&h.lock))
             .transpose()?;
 
+        // A pin is retried when its input moved; the other pins from the same
+        // failure go with it, or the package would build only because a
+        // sibling still pins it, and look fixed when it is not.
         let mut retrying = BTreeMap::new();
-        let pinned: Vec<(String, String, Pin)> = entry
+        let moved: Vec<(String, String)> = entry
             .iter()
-            .filter(|(_, _, p)| p.reason != Reason::Manual)
-            .map(|(i, a, p)| (i.to_string(), a.to_string(), p.clone()))
+            .filter(|(i, _, p)| {
+                p.reason != Reason::Manual
+                    && self.new_lock.nar_hash(i).as_deref() != Some(p.checked_nar_hash.as_str())
+            })
+            .map(|(i, a, _)| (i.to_string(), a.to_string()))
             .collect();
-        for (input, attr, pin) in pinned {
-            if self.new_lock.nar_hash(&input).as_deref() != Some(pin.checked_nar_hash.as_str()) {
-                log::info(&format!(
-                    "retrying {target}: {input}.{attr}: {input} moved since it was pinned"
-                ));
-                entry.remove(&input, &attr);
-                retrying.insert((input, attr), pin);
+        for (input, attr) in moved {
+            let group = entry.same_failure(&input, &attr);
+            if group.is_empty() {
+                continue;
+            }
+            log::info(&format!(
+                "retrying {target}: {attr} ({}): {input} moved since it was pinned",
+                group.join(", ")
+            ));
+            for i in group {
+                if let Some(pin) = entry.remove(&i, &attr) {
+                    retrying.insert((i, attr.clone()), pin);
+                }
             }
         }
         entry.lock_sha256 = self.new_lock.sha256();
@@ -383,19 +402,13 @@ impl Engine {
                 }
             } else {
                 let parsed = logparse::parse(&outcome.errors);
-                let infra: Vec<String> = parsed
+                let infra: Vec<(&String, &String)> = parsed
                     .iter()
                     .filter_map(|f| match f {
-                        Failure::Infra { drv, reason } => Some(format!("{drv}: {reason}")),
+                        Failure::Infra { drv, reason } => Some((drv, reason)),
                         _ => None,
                     })
                     .collect();
-                if !infra.is_empty() {
-                    bail!(
-                        "some builds could not run on this machine, which a pin cannot fix; nothing was pinned or held:\n  {}",
-                        infra.join("\n  ")
-                    );
-                }
                 let graph = graph.expect("shown for a failed build");
                 let failed = build_failures(&outcome.errors);
                 let not_built = logparse::failed_drvs(&outcome.errors);
@@ -418,7 +431,15 @@ impl Engine {
                         failed.iter().filter(|d| closure.contains(*d)).collect();
                     let st = &mut states[*i];
                     let own_build_failed = closure.iter().any(|d| not_built.contains(d));
-                    if mine.is_empty() && (own_build_failed || !crate::nix::is_built(top)?) {
+                    // A build that cannot run here (another platform, no
+                    // builder, out of memory) is this machine's problem, not
+                    // the package's: the host waits for it, without a pin.
+                    if let Some((drv, reason)) = infra.iter().find(|(d, _)| closure.contains(*d)) {
+                        st.status = Status::Failed(format!(
+                            "{} could not run on this machine ({reason}), which a pin cannot fix",
+                            graph.display_name(drv)
+                        ));
+                    } else if mine.is_empty() && (own_build_failed || !crate::nix::is_built(top)?) {
                         st.status = Status::Failed(format!(
                             "its system did not build, and nix reported no failure nixheal can pin: {why}"
                         ));
@@ -461,12 +482,12 @@ impl Engine {
                 ));
                 continue;
             }
+            let error = msgs.first().map(|m| logparse::headline(m));
             let mut context: Option<Vec<String>> = None;
             let mut wanted = Vec::new();
             for attr in attrs {
-                let mut found = self
-                    .eval_input(st, &attr)?
-                    .map(|input| (input, attr.clone()));
+                let inputs = self.eval_input(st, &attr)?;
+                let mut found = (!inputs.is_empty()).then(|| (inputs, attr.clone()));
                 if found.is_none() {
                     let context = match &context {
                         Some(c) => c,
@@ -483,23 +504,25 @@ impl Engine {
                         }
                     };
                     for outer in context {
-                        if let Some(input) = self.eval_input(st, outer)? {
+                        let inputs = self.eval_input(st, outer)?;
+                        if !inputs.is_empty() {
                             log::info(&format!(
                                 "{}: {attr} is not pinnable itself; {outer}, which evaluation fails inside, is",
                                 st.target
                             ));
-                            found = Some((input, outer.clone()));
+                            found = Some((inputs, outer.clone()));
                             break;
                         }
                     }
                 }
                 match found {
-                    Some((input, attr)) => wanted.push(Wanted {
-                        input,
-                        attr,
+                    Some((inputs, attr)) => wanted.push(Wanted {
+                        members: inputs.into_iter().map(|i| (i, attr.clone())).collect(),
                         reason: Reason::Eval,
                         failed_drv: None,
+                        cause: format!("evaluation failed: {}", error.clone().unwrap_or_default()),
                         trail: Vec::new(),
+                        error: error.clone(),
                     }),
                     None => {
                         st.status = Status::Failed(format!(
@@ -619,33 +642,45 @@ impl Engine {
                         }
                     )));
                 }
-                let attrs: BTreeSet<&(String, String)> = matcher.attrs(root).collect();
-                for (input, attr) in attrs {
-                    if !wanted.iter().any(|w| &w.input == input && &w.attr == attr) {
-                        wanted.push(Wanted {
-                            input: input.clone(),
-                            attr: attr.clone(),
-                            reason: Reason::Build,
-                            failed_drv: Some(drv.to_string()),
-                            trail: graph.trail(drv, root, closure),
-                        });
-                    }
+                let members: Vec<(String, String)> = matcher
+                    .attrs(root)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .filter(|m| !wanted.iter().any(|w| w.members.contains(m)))
+                    .cloned()
+                    .collect();
+                if !members.is_empty() {
+                    wanted.push(Wanted {
+                        members,
+                        reason: Reason::Build,
+                        failed_drv: Some(drv.to_string()),
+                        cause: format!("{} failed to build", graph.display_name(drv)),
+                        trail: graph.trail(drv, root, closure),
+                        error: None,
+                    });
                 }
             }
         }
         Ok(Ok(wanted))
     }
 
-    /// The input whose last good set provides `attr` while the new one does not.
-    /// A pin under retry counts as last good: the last lock only built because
-    /// of it.
-    fn eval_input(&self, st: &State, attr: &str) -> Result<Option<String>> {
+    /// The inputs whose last good set provides `attr` while the new one does
+    /// not; every one of them, since the configuration may use any. A pin
+    /// under retry counts as last good: the last lock only built because of it.
+    fn eval_input(&self, st: &State, attr: &str) -> Result<Vec<String>> {
         if !resolve::is_attr_name(attr) {
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        if let Some((input, _)) = st.retrying.keys().find(|(_, a)| a == attr) {
-            return Ok(Some(input.clone()));
+        let retried: Vec<String> = st
+            .retrying
+            .keys()
+            .filter(|(_, a)| a == attr)
+            .map(|(i, _)| i.clone())
+            .collect();
+        if !retried.is_empty() {
+            return Ok(retried);
         }
+        let mut found = Vec::new();
         let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
         let system = st.system.get_or_init(|| {
             self.nix
@@ -663,10 +698,10 @@ impl Engine {
             if resolve::evaluates_at(&old, system, attr)?
                 && !resolve::evaluates_at(&new, system, attr)?
             {
-                return Ok(Some(input.clone()));
+                found.push(input.clone());
             }
         }
-        Ok(None)
+        Ok(found)
     }
 
     fn apply(&self, st: &mut State, wanted: Result<Vec<Wanted>, String>) {
@@ -686,66 +721,98 @@ impl Engine {
         }
     }
 
+    /// Pin each failure in every package set that can take the pin; a set
+    /// that cannot (it did not move, it is new in the lock, its pin did not
+    /// help) is skipped, and only a failure no set can take fails the target.
     fn add_pins(&self, st: &mut State, wanted: Vec<Wanted>) -> Result<(), String> {
         for w in wanted {
-            let key = st.key(&w.input, &w.attr);
-            if resolve::denied(&w.attr, &self.deny) {
+            if let Some((input, attr)) = w
+                .members
+                .iter()
+                .find(|(_, a)| resolve::denied(a, &self.deny))
+            {
                 return Err(format!(
-                    "{}.{} fails and is on the never-pin list (the built-in core packages, or programs.nixheal.deny)",
-                    w.input, w.attr
+                    "{input}.{attr} fails and is on the never-pin list (the built-in core packages, or programs.nixheal.deny)"
                 ));
             }
-            if st.entry.get(&w.input, &w.attr).is_some() {
-                return Err(format!("{}.{} is pinned and still fails", w.input, w.attr));
-            }
-            let checked = self
-                .new_lock
-                .nar_hash(&w.input)
-                .ok_or_else(|| format!("{} is not an input of the new lock", w.input))?;
-
-            let pin = match st.retrying.remove(&(w.input.clone(), w.attr.clone())) {
-                Some(mut pin) => {
-                    log::info(&format!(
-                        "still failing {key}, keeping the pin from {}",
-                        pin.since
-                    ));
-                    pin.checked_nar_hash = checked;
-                    pin
+            let mut skipped: Vec<String> = Vec::new();
+            let mut kept: Vec<String> = Vec::new();
+            let mut added: Vec<(String, String, Pin)> = Vec::new();
+            for (input, attr) in &w.members {
+                if st.entry.get(input, attr).is_some() {
+                    skipped.push(format!("{input}.{attr} is pinned and still fails"));
+                    continue;
                 }
-                None => {
-                    let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
-                    let locked = old_lock.locked(&w.input).ok_or_else(|| {
-                        format!("{} is not an input of the last good lock", w.input)
-                    })?;
-                    if locked["narHash"].as_str() == Some(checked.as_str()) {
-                        return Err(format!(
-                            "{}.{} fails at the last good {} too, so pinning cannot help",
-                            w.input, w.attr, w.input
-                        ));
-                    }
-                    st.new_pins += 1;
-                    if st.new_pins > self.max_new_pins {
-                        return Err(format!(
-                            "it needs more than {} new pins in one run (--max-new-pins)",
-                            self.max_new_pins
-                        ));
-                    }
-                    log::change(&format!(
-                        "pinned {key} at {}: {}",
-                        describe(&locked),
-                        w.failed_drv.as_deref().unwrap_or("evaluation failed")
+                let Some(checked) = self.new_lock.nar_hash(input) else {
+                    skipped.push(format!("{input} is not an input of the new lock"));
+                    continue;
+                };
+                if let Some(mut pin) = st.retrying.remove(&(input.clone(), attr.clone())) {
+                    pin.checked_nar_hash = checked;
+                    kept.push(format!("{input} (since {})", pin.since));
+                    st.entry.insert(input, attr, pin);
+                    continue;
+                }
+                let old_lock = st.held_lock.as_ref().unwrap_or(&st.old_lock);
+                let Some(locked) = old_lock.locked(input) else {
+                    skipped.push(format!("{input} is not in the last good lock"));
+                    continue;
+                };
+                if locked["narHash"].as_str() == Some(checked.as_str()) {
+                    skipped.push(format!(
+                        "{input}.{attr} fails at the last good {input} too, so pinning cannot help"
                     ));
+                    continue;
+                }
+                added.push((
+                    input.clone(),
+                    attr.clone(),
                     Pin {
                         locked,
                         since: date::format(self.today),
                         reason: w.reason,
-                        failed_drv: w.failed_drv,
-                        trail: w.trail,
+                        failed_drv: w.failed_drv.clone(),
+                        trail: w.trail.clone(),
+                        error: w.error.clone(),
                         checked_nar_hash: checked,
-                    }
+                    },
+                ));
+            }
+            if added.is_empty() && kept.is_empty() {
+                return Err(skipped.join("; "));
+            }
+            let attrs: BTreeSet<&str> = w.members.iter().map(|(_, a)| a.as_str()).collect();
+            let name = attrs.into_iter().collect::<Vec<_>>().join(", ");
+            if !kept.is_empty() {
+                log::info(&format!(
+                    "{}: {name} still fails; keeping its pin in {}",
+                    st.target,
+                    kept.join(", ")
+                ));
+            }
+            if !added.is_empty() {
+                st.new_pins += 1;
+                if st.new_pins > self.max_new_pins {
+                    return Err(format!(
+                        "it needs more than {} new pin(s) in one run (--max-new-pins)",
+                        self.max_new_pins
+                    ));
                 }
-            };
-            st.entry.insert(&w.input, &w.attr, pin);
+                let sets: Vec<&str> = added.iter().map(|(i, _, _)| i.as_str()).collect();
+                log::change(&format!(
+                    "pinned {}: {name} ({}) at {}: {}",
+                    st.target,
+                    sets.join(", "),
+                    describe_dated(&added[0].2.locked),
+                    w.cause
+                ));
+                for (input, attr, pin) in added {
+                    st.entry.insert(&input, &attr, pin);
+                }
+            }
+            for why in skipped {
+                log::info(&format!("{}: not pinning {why}", st.target));
+            }
         }
         Ok(())
     }
@@ -768,13 +835,13 @@ impl Engine {
             return Ok(report);
         }
         let mut file = original;
-        let mut done_with: Vec<(Target, Vec<u8>)> = Vec::new();
+        let mut done_with: Vec<(Target, Vec<u8>, Option<String>)> = Vec::new();
         for st in states {
             let target = st.target.clone();
             match st.status {
                 Status::Done => {
-                    if let Some(bytes) = &st.built_with {
-                        done_with.push((target.clone(), bytes.clone()));
+                    if let Some((bytes, source)) = &st.built_with {
+                        done_with.push((target.clone(), bytes.clone(), source.clone()));
                     }
                     if Some(&target) == self.local.as_ref() {
                         report.local_drv = st.drv.clone();
@@ -782,39 +849,68 @@ impl Engine {
                     if let Some(drv) = &st.drv {
                         report.built.push((target.clone(), drv.clone()));
                     }
+                    let mut released: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
                     for (input, attr) in st.retrying.keys() {
-                        log::change(&format!("unpinned {target}: {input}.{attr}: builds again"));
+                        released.entry(attr).or_default().push(input);
                     }
-                    report.changes.extend(
-                        st.retrying
-                            .keys()
-                            .map(|(i, a)| format!("unpinned {target}: {i}.{a}")),
-                    );
+                    for (attr, inputs) in released {
+                        let still: Vec<String> = st.entry.inputs_pinning(attr);
+                        if still.is_empty() {
+                            log::change(&format!(
+                                "unpinned {target}: {attr} ({}): builds again",
+                                inputs.join(", ")
+                            ));
+                            report.changes.push(format!("unpinned {target}: {attr}"));
+                        } else {
+                            log::info(&format!(
+                                "{target}: {attr} no longer needs its pin in {}; still pinned in {}",
+                                inputs.join(", "),
+                                still.join(", ")
+                            ));
+                        }
+                    }
                     if st.held_before.is_some() {
                         log::change(&format!("released {target}: it builds with the new lock"));
                         report.changes.push(format!("released {target}"));
                     }
                     let previous = st.base.as_ref();
-                    for (input, attr, pin) in st.entry.iter() {
-                        if previous.and_then(|b| b.get(input, attr)).is_none() {
+                    for (attr, pins) in st.entry.packages() {
+                        let new: Vec<&str> = pins
+                            .iter()
+                            .filter(|(i, _)| previous.and_then(|b| b.get(i, attr)).is_none())
+                            .map(|(i, _)| *i)
+                            .collect();
+                        if !new.is_empty() {
                             report
                                 .changes
-                                .push(format!("pinned {target}: {input}.{attr}"));
+                                .push(format!("pinned {target}: {attr} ({})", new.join(", ")));
                         }
-                        self.log_age(&target, input, attr, pin);
+                        self.log_age(&target, attr, pins[0].1);
                     }
                     file.set(target.kind, &target.name, st.entry);
                     log::info(&format!("{target} builds"));
                 }
                 Status::Failed(reason) => {
+                    report.held += 1;
                     if Some(&target) == self.local.as_ref() {
                         report.local_held = true;
                     }
-                    let mut entry = st.base.unwrap_or_else(|| Entry {
-                        lock_sha256: st.old_lock.sha256(),
-                        lock_last_modified: st.old_lock.last_modified(),
-                        ..Default::default()
-                    });
+                    let mut entry = st.base.unwrap_or_default();
+                    // A held entry is computed from the lock it is held on,
+                    // which is what consumers and merge compare.
+                    if st.held_before.is_none() {
+                        entry.lock_sha256 = st.old_lock.sha256();
+                        entry.lock_last_modified = st.old_lock.last_modified();
+                    }
+                    let release = format!(
+                        "nixheal clear --held --{} {}",
+                        match target.kind {
+                            Kind::Nixos => "host",
+                            Kind::Home => "home",
+                        },
+                        target.name
+                    );
+                    let reason = reason.trim_end_matches('.').to_string();
                     let held = match st.held_before {
                         Some(mut h) => {
                             log::change(&format!(
@@ -827,7 +923,7 @@ impl Engine {
                         None => {
                             report.changes.push(format!("held {target}: {reason}"));
                             log::change(&format!(
-                                "held {target} on its last good lock: {reason}. It is retried on every run; see nixheal status"
+                                "held {target} on its last good lock: {reason}. It is retried on every run; release it by hand with '{release}'"
                             ));
                             Held {
                                 since: date::format(self.today),
@@ -854,14 +950,37 @@ impl Engine {
     fn refresh_built(
         &self,
         final_bytes: &[u8],
-        done_with: &[(Target, Vec<u8>)],
+        done_with: &[(Target, Vec<u8>, Option<String>)],
         report: &mut Report,
     ) -> Result<()> {
-        let stale: Vec<&Target> = done_with
-            .iter()
-            .filter(|(_, b)| b.as_slice() != final_bytes)
-            .map(|(t, _)| t)
-            .collect();
+        let mut stale: Vec<&Target> = Vec::new();
+        for (target, bytes, source) in done_with {
+            if bytes.as_slice() == final_bytes {
+                continue;
+            }
+            let Some(drv) = report
+                .built
+                .iter()
+                .find(|(t, _)| t == target)
+                .map(|(_, d)| d)
+            else {
+                continue;
+            };
+            // Only a system that takes the flake's source tree as a source can
+            // depend on what other targets' entries say.
+            let embeds = match source {
+                Some(src) => self
+                    .nix
+                    .show_drvs(std::slice::from_ref(drv))?
+                    .nodes
+                    .values()
+                    .any(|n| n.srcs.iter().any(|p| p == src)),
+                None => true,
+            };
+            if embeds {
+                stale.push(target);
+            }
+        }
         if stale.is_empty() {
             return Ok(());
         }
@@ -902,20 +1021,19 @@ impl Engine {
         Ok(())
     }
 
-    fn log_age(&self, target: &Target, input: &str, attr: &str, pin: &Pin) {
+    /// Warn about a pin older than warnAfterDays; younger ones are left to
+    /// nixheal status.
+    fn log_age(&self, target: &Target, attr: &str, pin: &Pin) {
         match date::parse(&pin.since).map(|d| self.today - d) {
             Some(days) if days > self.warn_after_days && pin.reason != Reason::Manual => {
                 log::warn(&format!(
-                    "{target}: {input}.{attr} has been pinned for {days} days (warn after {}); see nixheal why {attr}",
+                    "{target}: {attr} has been pinned for {days} days (warn after {}); see nixheal why {attr}",
                     self.warn_after_days
                 ))
             }
-            Some(0) => log::info(&format!("{target}: {input}.{attr} pinned today")),
-            Some(days) => log::info(&format!(
-                "{target}: {input}.{attr} pinned for {days} day(s)"
-            )),
+            Some(_) => {}
             None => log::warn(&format!(
-                "{target}: {input}.{attr} has an unreadable date {:?}",
+                "{target}: {attr} has an unreadable date {:?}",
                 pin.since
             )),
         }
@@ -948,6 +1066,15 @@ fn flake_relative(path: &str) -> Option<String> {
     })?;
     let rel = parts[object + 1..].join("/");
     (!rel.is_empty()).then_some(rel)
+}
+
+/// A locked input as a revision and the day it is from, e.g.
+/// "718f670e8453 from 2026-10-20".
+pub fn describe_dated(locked: &serde_json::Value) -> String {
+    match locked["lastModified"].as_i64() {
+        Some(t) => format!("{} from {}", describe(locked), date::format(t / 86_400)),
+        None => describe(locked),
+    }
 }
 
 pub fn describe(locked: &serde_json::Value) -> String {

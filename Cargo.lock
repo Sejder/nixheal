@@ -277,6 +277,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "libc",
  "regex",
  "serde",
  "serde_json",

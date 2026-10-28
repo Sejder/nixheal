@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Fixes from the second and third independent reviews of 0.1.1.
+Fixes from the second, third and fourth independent reviews of 0.1.1.
 
 Breaking: nixheal no longer commits by default. `build`, `switch` and `boot`
 leave `flake.lock` and `pins.json` changed in the checkout unless given
@@ -18,8 +18,6 @@ Failures:
 - A package nixpkgs refuses to evaluate as insecure, unfree or unsupported
   holds the host instead of being pinned around; a package marked broken is
   still pinned.
-- A build that fails without naming a derivation fails the hosts that built,
-  instead of none of them.
 - A build killed by a signal, or a failed download that is not a hash
   mismatch, is retried once, and a signal counts as infrastructure rather than
   a broken package.
@@ -107,6 +105,53 @@ Command line:
 - Error messages name where a path came from, cut nix's errors to the line
   that says what failed, and avoid store paths where a name will do.
 - `--max-rounds 0` is refused.
+
+Package sets:
+
+- A package several package sets provide as the same derivation is one
+  failure: it is pinned in every set that can take the pin (a set that did
+  not move, or is new in the lock, is skipped instead of holding the host),
+  counts once against `--max-new-pins`, is retried and released as a group,
+  and is never reported "builds again" while a sibling pin still carries it.
+  `status`, `why`, `status --json` and the logs show it once, with its sets.
+- An evaluation failure is pinned in every set that lost the attribute, not
+  only the first.
+- Pinned packages and extra package sets are imported with the full build and
+  host platforms, so `pkgsStatic`, `pkgsMusl`, cross builds and custom
+  platform settings keep them.
+
+Runs:
+
+- A build that cannot run here (another platform, no builder, out of memory)
+  holds only the hosts that need it; this machine's own is given up on.
+- A held entry records the lock hash of the lock it is held on.
+- An interrupt stops the running nix too, and no write lands after the
+  restore.
+- The Home Manager `autoUpgrade` with no `homes` is an error, as on NixOS.
+- New `autoUpgrade.timeout` (12h) stops a stuck run.
+- `--gc-roots` lists the roots each flake made, so flakes sharing a directory
+  keep each other's.
+- `merge` keeps pins made by hand here that the incoming entry lacks.
+- A read-only nixpkgs (`readOnlyPkgs`) gets a warning instead of an error.
+- New `--fail-on-hold`, exiting with 3 when something is held.
+- Pins of evaluation failures keep nix's error, and `why` shows it.
+
+More command line:
+
+- `pin`, `why` and `clear` refuse a `--host` or `--home` that is not
+  configured.
+- The closing line says when nothing changed instead of claiming uncommitted
+  files, and a commit's title follows whether `flake.lock` changed.
+- Holds say how to release them; `status` ends with what to run next.
+- Pin lines name the package, its sets, the revision's date and what failed.
+- Per-pin age lines are gone below `warnAfterDays`.
+- `build --help` groups fleet and tuning options; `-u` for `--update`,
+  `unpin` for `clear`, `-v`/`--verbose` to override `quiet`, `--only a,b`.
+- `clear` with no argument says `<ATTR|--held>`.
+- Errors about a config file say where its path came from, and the config's
+  JSON format is documented.
+- `status --json` names targets `host NAME` and `home NAME`, `pins` counts
+  packages, and rows carry `inputs`.
 
 ## 0.1.1
 

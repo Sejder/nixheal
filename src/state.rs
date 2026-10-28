@@ -12,7 +12,7 @@ fn state_dir() -> Option<PathBuf> {
         .map(|d| d.join("nixheal"))
 }
 
-fn key(text: &str) -> String {
+pub fn key(text: &str) -> String {
     Sha256::digest(text.as_bytes())
         .iter()
         .take(8)

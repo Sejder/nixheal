@@ -43,49 +43,66 @@ pub struct Where {
 #[derive(clap::Args)]
 pub struct BuildArgs {
     /// Run nix flake update first; only the named inputs when given.
-    #[arg(long, num_args = 0.., value_name = "INPUT")]
+    #[arg(short, long, num_args = 0.., value_name = "INPUT")]
     pub update: Option<Vec<String>>,
     /// Evaluate and build as usual and report what would be pinned and
     /// unpinned, then restore flake.lock and pins.json.
     #[arg(long)]
     pub dry_run: bool,
-    /// Commit flake.lock and pins.json after the run; the default when
-    /// programs.nixheal.commit is set.
+    /// Commit flake.lock and pins.json afterwards (default:
+    /// programs.nixheal.commit, which is off).
     #[arg(long, overrides_with = "no_commit")]
     pub commit: bool,
-    /// Leave flake.lock and pins.json uncommitted, whatever
-    /// programs.nixheal.commit says; the default otherwise.
+    /// Don't commit, overriding programs.nixheal.commit.
     #[arg(long, overrides_with = "commit")]
     pub no_commit: bool,
-    /// Hold the machine's own host like any other when it cannot be fixed,
-    /// instead of giving up; for a machine that builds a fleet.
-    #[arg(long)]
-    pub hold_local: bool,
-    /// Point this symlink at the machine's own system once it built, and
-    /// remove it otherwise, so a separate step can activate it.
-    #[arg(long, value_name = "PATH")]
-    pub built_link: Option<PathBuf>,
-    /// Only these hosts or homes from the config; repeatable.
-    #[arg(long = "only", value_name = "NAME")]
+
+    /// Only these hosts or homes from the config; repeatable, or
+    /// comma-separated.
+    #[arg(
+        long = "only",
+        value_name = "NAME",
+        value_delimiter = ',',
+        help_heading = "Fleet options"
+    )]
     pub only: Vec<String>,
+    /// Hold this machine's own host like any other when it cannot be fixed,
+    /// instead of giving up; for a machine that builds a fleet.
+    #[arg(long, help_heading = "Fleet options")]
+    pub hold_local: bool,
+    /// Point this symlink at this machine's own system once it built, and
+    /// remove it otherwise, so a separate step can activate it.
+    #[arg(long, value_name = "PATH", help_heading = "Fleet options")]
+    pub built_link: Option<PathBuf>,
+    /// Keep every system that built alive with a GC root in this directory,
+    /// e.g. for a binary cache to serve them. Roots this flake's runs made
+    /// there for targets no longer configured are removed; nothing else is.
+    #[arg(long, value_name = "DIR", help_heading = "Fleet options")]
+    pub gc_roots: Option<PathBuf>,
+    /// Exit with 3 when a host or home is held, e.g. so a service's
+    /// OnFailure reports it.
+    #[arg(long, help_heading = "Fleet options")]
+    pub fail_on_hold: bool,
+
     /// The lock to pin back to; by default the one each target last built with.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", help_heading = "Tuning")]
     pub old_lock: Option<PathBuf>,
     /// Give up after this many evaluate-and-build rounds.
-    #[arg(long, value_name = "N", default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 8,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Tuning"
+    )]
     pub max_rounds: u32,
-    /// Hold a host, or give up on this machine's own, rather than add more
-    /// than this many new pins to it in one run.
-    #[arg(long, value_name = "N", default_value_t = 10)]
+    /// Hold a host, or give up on this machine's own, rather than pin more
+    /// than this many new packages for it in one run.
+    #[arg(long, value_name = "N", default_value_t = 10, help_heading = "Tuning")]
     pub max_new_pins: usize,
     /// The system for eval checks when a target's own cannot be evaluated.
-    #[arg(long, value_name = "SYSTEM", default_value_t = default_system())]
+    #[arg(long, value_name = "SYSTEM", default_value_t = default_system(), help_heading = "Tuning")]
     pub system: String,
-    /// Keep every system that built alive with a GC root in this directory,
-    /// e.g. for a binary cache to serve them. Roots nixheal made there for
-    /// targets no longer configured are removed; nothing else is touched.
-    #[arg(long, value_name = "DIR")]
-    pub gc_roots: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -126,7 +143,9 @@ impl Ctx {
                     log::set_quiet(c.quiet);
                     (Some(c), Some(found.path))
                 }
-                Err(e) if need_config || found.explicit => return Err(e),
+                Err(e) if need_config || found.explicit => {
+                    return Err(e.context(format!("the config file from {}", found.from)));
+                }
                 Err(e) => {
                     log::warn(&format!("ignoring {}: {e:#}", found.path.display()));
                     (None, None)
@@ -182,13 +201,43 @@ impl Ctx {
         self.flake.join(PINS)
     }
 
-    fn target(&self, pick: &Pick) -> Result<Target> {
-        match (&pick.host, &pick.home, &self.config) {
-            (Some(h), _, _) => Ok(Target::new(Kind::Nixos, h)),
-            (_, Some(h), _) => Ok(Target::new(Kind::Home, h)),
-            (None, None, Some(c)) => Ok(c.local()),
+    /// The target --host or --home names, or this machine's own. A name the
+    /// config does not list (and `file` has no entry for) is a typo: it would
+    /// write an entry nothing ever reads.
+    fn target(&self, pick: &Pick, file: Option<&PinsFile>) -> Result<Target> {
+        let target = match (&pick.host, &pick.home, &self.config) {
+            (Some(h), _, _) => Target::new(Kind::Nixos, h),
+            (_, Some(h), _) => Target::new(Kind::Home, h),
+            (None, None, Some(c)) => return Ok(c.local()),
             (None, None, None) => bail!("no config to take the host from; pass --host or --home"),
+        };
+        let Some(cfg) = &self.config else {
+            return Ok(target);
+        };
+        let mut known = cfg.targets();
+        known.push(cfg.local());
+        if known.contains(&target)
+            || file.is_some_and(|f| f.entry(target.kind, &target.name).is_some())
+        {
+            return Ok(target);
         }
+        let names: Vec<String> = known
+            .iter()
+            .filter(|t| t.kind == target.kind)
+            .map(|t| t.name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        bail!(
+            "{target} is not a configured {} (configured: {}); check --{}",
+            target.kind.noun(),
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            },
+            target.kind.noun()
+        )
     }
 
     /// The flags that name `target` on the command line, empty for this
@@ -299,7 +348,14 @@ fn activate(
         }
     };
     let program = cmd.get_program().to_string_lossy().into_owned();
-    log::info(&format!("{verb} {target} with {program}"));
+    log::info(&format!(
+        "{} {target} with {program}",
+        if verb == "boot" {
+            "setting up boot of"
+        } else {
+            "switching"
+        }
+    ));
     let status = cmd
         .status()
         .with_context(|| format!("running {program}; is it installed?"))?;
@@ -310,23 +366,62 @@ fn activate(
     })
 }
 
-/// Remove GC roots nixheal made for targets that are no longer configured,
-/// so their systems can be collected. Only symlinks named with nixheal's
-/// prefix are touched; other roots in the directory are left alone.
-fn prune_roots(dir: &Path, targets: &[Target]) -> Result<()> {
+/// The file in a --gc-roots directory listing the roots this flake's runs
+/// made, so two flakes sharing the directory leave each other's alone.
+fn roots_manifest(dir: &Path, flake: &Path) -> PathBuf {
+    dir.join(format!(
+        ".{ROOT_PREFIX}roots-{}",
+        state::key(&flake.to_string_lossy())
+    ))
+}
+
+/// Root the systems that built, and remove the roots this flake's runs made
+/// for targets that are no longer configured (only when `prune`), so their
+/// systems can be collected. Roots nixheal did not make are left alone.
+fn update_roots(
+    dir: &Path,
+    flake: &Path,
+    built: &[(Target, String)],
+    targets: &[Target],
+    prune: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (target, drv) in built {
+        nix::add_root(drv, &dir.join(target.root_name()))?;
+    }
+    let manifest = roots_manifest(dir, flake);
+    let ours: Vec<String> = std::fs::read_to_string(&manifest)
+        .map(|t| t.lines().map(str::to_string).collect())
+        .unwrap_or_default();
     let keep: Vec<String> = targets.iter().map(Target::root_name).collect();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(ROOT_PREFIX) && entry.file_type()?.is_symlink() && !keep.contains(&name)
-        {
-            std::fs::remove_file(entry.path())?;
-            log::info(&format!(
-                "removed the root {name}: its target is no longer configured"
-            ));
+    let mut listed: Vec<String> = if prune {
+        for name in ours.iter().filter(|n| !keep.contains(n)) {
+            let path = dir.join(name);
+            if path
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                log::info(&format!(
+                    "removed the root {name}: its target is no longer configured"
+                ));
+            }
+        }
+        Vec::new()
+    } else {
+        ours
+    };
+    for (target, _) in built {
+        let name = target.root_name();
+        if !listed.contains(&name) {
+            listed.push(name);
         }
     }
-    Ok(())
+    listed.sort();
+    let mut text = listed.join("\n");
+    text.push('\n');
+    crate::pins::write_atomic(&manifest, text.as_bytes())
 }
 
 fn remove_link(link: &Path) -> Result<()> {
@@ -502,7 +597,7 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         && let Err(e) = nix.flake_update(inputs)
     {
         guard::restore()?;
-        return Err(e);
+        return Err(e.context("restored flake.lock and pins.json"));
     }
 
     let engine = Engine {
@@ -532,14 +627,14 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         Ok(r) => r,
         Err(e) => {
             guard::restore()?;
-            return Err(e);
+            return Err(e.context("restored flake.lock and pins.json"));
         }
     };
 
     if report.local_failure.is_some() {
         guard::restore()?;
         log::change(
-            "restored flake.lock and pins.json; nothing was committed or activated. Fix that failure, or pass --hold-local to hold this host and update the others",
+            "restored flake.lock and pins.json; nothing was committed or activated. Fix the failure, or on a machine that builds a fleet, pass --hold-local to hold this host and update the rest",
         );
         return Ok(ExitCode::from(1));
     }
@@ -557,13 +652,13 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
     // the commit puts flake.lock and pins.json back.
     let settled = (|| -> Result<String> {
         if let Some(dir) = &args.gc_roots {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            for (target, drv) in &report.built {
-                nix::add_root(drv, &dir.join(target.root_name()))?;
-            }
-            if args.only.is_empty() {
-                prune_roots(dir, &cfg.targets())?;
-            }
+            update_roots(
+                dir,
+                &ctx.flake,
+                &report.built,
+                &cfg.targets(),
+                args.only.is_empty(),
+            )?;
             log::info(&format!(
                 "rooted {} system(s) in {}",
                 report.built.len(),
@@ -572,14 +667,24 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         }
         guard::settle(|| {
             let commit = (cfg.commit || args.commit) && !args.no_commit;
+            let Some(git) = &git else {
+                return Ok(if commit {
+                    "the flake is not in a git repository, so nothing was committed".into()
+                } else {
+                    "flake.lock and pins.json are not in a git repository".into()
+                });
+            };
+            if !git.changed(&[&lock_path, &pins_path])? {
+                return Ok("flake.lock and pins.json unchanged".into());
+            }
             if !commit {
                 return Ok(
-                    "left flake.lock and pins.json uncommitted (pass --commit, or set programs.nixheal.commit)"
+                    "flake.lock and pins.json changed but not committed (commit them yourself, pass --commit, or set programs.nixheal.commit = true)"
                         .into(),
                 );
             }
-            if let Some(git) = &git {
-                let title = if update.is_some() {
+            {
+                let title = if git.changed(&[&lock_path])? {
                     "nixheal: update flake.lock"
                 } else {
                     "nixheal: update pins"
@@ -595,9 +700,8 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
                         None => format!("committed {title:?}"),
                     });
                 }
-                return Ok("nothing to commit".into());
+                Ok("nothing to commit".into())
             }
-            Ok("the flake is not in a git repository, so nothing was committed".into())
         })
     })();
     let committed = match settled {
@@ -634,25 +738,33 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         nix::add_root(drv, link)?;
     }
 
-    match &local {
+    let code = match &local {
         Some(target) if report.local_held => {
             if how != Activation::None {
                 log::warn(&format!(
                     "not activating: {target} is held; see nixheal status"
                 ));
             }
-            Ok(ExitCode::SUCCESS)
+            ExitCode::SUCCESS
         }
-        Some(target) => activate(target, &ctx.flake, built.as_deref(), how, &cfg.switcher),
+        Some(target) => activate(target, &ctx.flake, built.as_deref(), how, &cfg.switcher)?,
         None if how != Activation::None => {
             log::info(&format!(
                 "not activating: {} was not built in this run",
                 cfg.local()
             ));
-            Ok(ExitCode::SUCCESS)
+            ExitCode::SUCCESS
         }
-        None => Ok(ExitCode::SUCCESS),
+        None => ExitCode::SUCCESS,
+    };
+    if args.fail_on_hold && report.held > 0 && code == ExitCode::SUCCESS {
+        log::warn(&format!(
+            "{} target(s) held; exiting with 3 (--fail-on-hold)",
+            report.held
+        ));
+        return Ok(ExitCode::from(3));
     }
+    Ok(code)
 }
 
 pub fn merge(at: &Where, other: &Path) -> Result<ExitCode> {
@@ -713,6 +825,14 @@ fn reason_words(reason: Reason) -> &'static str {
     }
 }
 
+fn age_text(days: Option<i64>) -> String {
+    match days {
+        Some(0) => "today".into(),
+        Some(d) => format!("{d}d"),
+        None => "?".into(),
+    }
+}
+
 pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
     let pins_path = ctx.pins_path();
@@ -748,8 +868,8 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
             stale += 1;
         }
         format!(
-            "{date_text} ({}d){}",
-            age.map_or("?".into(), |a| a.to_string()),
+            "{date_text} ({}){}",
+            age_text(age),
             if old { " STALE" } else { "" }
         )
     };
@@ -759,17 +879,19 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
             held += 1;
             rows.push(Row {
                 target: target.clone(),
-                what: "(held)".into(),
-                reason: "held".into(),
+                what: "-".into(),
+                reason: "whole host held".into(),
                 since: since(&h.since, false),
                 note: Some(h.reason.clone()),
             });
         }
-        for (input, attr, pin) in entry.iter() {
+        for (attr, sets) in entry.packages() {
             pins += 1;
+            let pin = sets[0].1;
+            let inputs: Vec<&str> = sets.iter().map(|(i, _)| *i).collect();
             rows.push(Row {
                 target: target.clone(),
-                what: format!("{input}.{attr}"),
+                what: format!("{attr} ({})", inputs.join(", ")),
                 reason: reason_words(pin.reason).into(),
                 since: since(&pin.since, pin.reason == Reason::Manual),
                 note: None,
@@ -789,10 +911,13 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
     };
     let (wt, ww, wr) = (
         width(|r| &r.target, "TARGET"),
-        width(|r| &r.what, "PIN"),
+        width(|r| &r.what, "PACKAGE (SETS)"),
         width(|r| &r.reason, "REASON"),
     );
-    println!("{:wt$}  {:ww$}  {:wr$}  SINCE", "TARGET", "PIN", "REASON");
+    println!(
+        "{:wt$}  {:ww$}  {:wr$}  SINCE",
+        "TARGET", "PACKAGE (SETS)", "REASON"
+    );
     for r in &rows {
         println!(
             "{:wt$}  {:ww$}  {:wr$}  {}",
@@ -802,33 +927,44 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
             println!("    {note}");
         }
     }
+    println!("{pins} pinned package(s), {held} held, {stale} stale (older than {warn} days).");
     println!(
-        "{pins} pin(s), {held} held, {stale} stale (older than {warn} days). 'nixheal why ATTR' shows why a package is pinned."
+        "'nixheal why ATTR' explains a pin, 'nixheal clear ATTR' removes one, 'nixheal clear --held --host NAME' releases a hold."
     );
     Ok(ExitCode::SUCCESS)
 }
 
 pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
     let ctx = Ctx::open(at, false)?;
-    let target = ctx.target(pick)?;
     let file = PinsFile::load(&ctx.pins_path())?;
-    let inputs = file
+    let target = ctx.target(pick, Some(&file))?;
+    let Some(sets) = file
         .entry(target.kind, &target.name)
-        .map(|e| e.inputs_pinning(attr))
-        .unwrap_or_default();
-    if inputs.is_empty() {
+        .and_then(|e| e.packages().remove(attr).filter(|s| !s.is_empty()))
+    else {
         bail!(
             "{attr} is not pinned on {target}{}",
             ctx.pinned_elsewhere(&file, &target, attr)
         );
+    };
+    println!("{target}: {attr}");
+    let mut failures: Vec<&Pin> = Vec::new();
+    for (_, pin) in &sets {
+        if !failures.iter().any(|p| p.same_failure(pin) || *p == *pin) {
+            failures.push(pin);
+        }
     }
-    let entry = file.entry(target.kind, &target.name).expect("has pins");
-    for input in inputs {
-        let pin = entry.get(&input, attr).expect("listed input");
-        println!("{target}: {input}.{attr}");
+    let inputs: Vec<String> = sets
+        .iter()
+        .map(|(i, p)| format!("{i} at {}", engine::describe_dated(&p.locked)))
+        .collect();
+    println!("  pinned in: {}", inputs.join(", "));
+    for pin in failures {
         println!("  reason:    {}", reason_words(pin.reason));
         println!("  since:     {}", pin.since);
-        println!("  pinned at: {} ({input})", engine::describe(&pin.locked));
+        if let Some(error) = &pin.error {
+            println!("  error:     {error}");
+        }
         if let Some(drv) = &pin.failed_drv {
             println!("  failed:    {drv}");
         }
@@ -843,8 +979,8 @@ pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
                 println!("    {line}");
             }
         }
-        println!("  undo with: nixheal clear {attr}{}", ctx.flag_for(&target));
     }
+    println!("  undo with: nixheal clear {attr}{}", ctx.flag_for(&target));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -856,7 +992,7 @@ pub fn pin(at: &Where, pick: &Pick, attr: &str, input: Option<&str>) -> Result<E
     ctx.announce();
     check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
-    let target = ctx.target(pick)?;
+    let target = ctx.target(pick, None)?;
     let input = input
         .map(str::to_string)
         .or_else(|| ctx.config.as_ref().and_then(|c| c.input.clone()))
@@ -902,6 +1038,7 @@ pub fn pin(at: &Where, pick: &Pick, attr: &str, input: Option<&str>) -> Result<E
             reason: Reason::Manual,
             failed_drv: None,
             trail: Vec::new(),
+            error: None,
             checked_nar_hash: checked,
         },
     );
@@ -924,9 +1061,9 @@ pub fn clear(
     ctx.announce();
     check_flake(&ctx)?;
     let _run_lock = guard::lock_flake(&ctx.flake)?;
-    let target = ctx.target(pick)?;
     let pins_path = ctx.pins_path();
     let mut file = PinsFile::load(&pins_path)?;
+    let target = ctx.target(pick, Some(&file))?;
     let elsewhere = attr.map(|a| ctx.pinned_elsewhere(&file, &target, a));
     let entry = file.entry_mut(target.kind, &target.name);
     if held {

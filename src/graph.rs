@@ -11,6 +11,8 @@ pub struct Node {
     pub parents: Vec<String>,
     /// A fixed-output derivation, i.e. a download.
     pub fixed_output: bool,
+    /// Store paths it takes as sources, such as a flake's source tree.
+    pub srcs: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +42,8 @@ struct DrvJson {
     inputs: Option<InputsJson>,
     #[serde(default, rename = "inputDrvs")]
     input_drvs: Option<HashMap<String, IgnoredAny>>,
+    #[serde(default, rename = "inputSrcs")]
+    input_srcs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -56,6 +60,8 @@ struct EnvJson {
 struct InputsJson {
     #[serde(default)]
     drvs: HashMap<String, IgnoredAny>,
+    #[serde(default)]
+    srcs: Vec<String>,
 }
 
 /// The store directory a store path lives in, e.g. /nix/store for
@@ -88,10 +94,10 @@ impl Graph {
 
         let mut graph = Graph::default();
         for (path, drv) in drvs {
-            let inputs = match (drv.inputs, drv.input_drvs) {
-                (Some(i), _) => i.drvs.into_keys().collect(),
-                (None, Some(i)) => i.into_keys().collect(),
-                (None, None) => Vec::new(),
+            let (inputs, srcs): (Vec<String>, Vec<String>) = match (drv.inputs, drv.input_drvs) {
+                (Some(i), _) => (i.drvs.into_keys().collect(), i.srcs),
+                (None, Some(i)) => (i.into_keys().collect(), drv.input_srcs.unwrap_or_default()),
+                (None, None) => (Vec::new(), drv.input_srcs.unwrap_or_default()),
             };
             let node = Node {
                 name: drv.name.or(drv.env.name).unwrap_or_default(),
@@ -99,6 +105,7 @@ impl Graph {
                 inputs: inputs.into_iter().map(|i| full_path(store, i)).collect(),
                 parents: Vec::new(),
                 fixed_output: drv.env.output_hash.is_some(),
+                srcs: srcs.into_iter().map(|p| full_path(store, p)).collect(),
             };
             graph.nodes.insert(full_path(store, path), node);
         }

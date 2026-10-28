@@ -19,14 +19,7 @@ let
       inherit input nixpkgsConfig;
     };
 
-  platformArgs =
-    if pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system then
-      { inherit (pkgs.stdenv.hostPlatform) system; }
-    else
-      {
-        localSystem = pkgs.stdenv.buildPlatform.system;
-        crossSystem = pkgs.stdenv.hostPlatform.system;
-      };
+  platformArgs = import ./platform.nix pkgs.stdenv.buildPlatform pkgs.stdenv.hostPlatform;
 
   extraSets = lib.mapAttrs (
     input: set:
@@ -115,28 +108,35 @@ in
         ) cfg.nixpkgs
       );
     }
-    (lib.mkIf cfg.enable {
-      assertions = [
-        {
-          assertion = cfg.pinsFile != null;
-          message = "programs.nixheal.pinsFile must point at the flake's pins.json";
-        }
-        {
-          assertion =
-            cfg.pinsFile == null
-            || builtins.isPath cfg.pinsFile
-            || lib.hasPrefix "${builtins.storeDir}/" (toString cfg.pinsFile);
-          message = "programs.nixheal.pinsFile must be a path such as ./pins.json, not a string";
-        }
-      ]
-      ++ lib.mapAttrsToList (input: set: {
-        assertion = set.argName == null || !(builtins.elem set.argName reservedArgs);
-        message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
-      }) cfg.nixpkgs;
-      nixpkgs.overlays = lib.mkAfter [
-        (overlay cfg.input (if options.nixpkgs.pkgs.isDefined then null else config.nixpkgs.config))
-      ];
-    })
+    (lib.mkIf cfg.enable (
+      {
+        assertions = [
+          {
+            assertion = cfg.pinsFile != null;
+            message = "programs.nixheal.pinsFile must point at the flake's pins.json";
+          }
+          {
+            assertion =
+              cfg.pinsFile == null
+              || builtins.isPath cfg.pinsFile
+              || lib.hasPrefix "${builtins.storeDir}/" (toString cfg.pinsFile);
+            message = "programs.nixheal.pinsFile must be a path such as ./pins.json, not a string";
+          }
+        ]
+        ++ lib.mapAttrsToList (input: set: {
+          assertion = set.argName == null || !(builtins.elem set.argName reservedArgs);
+          message = "programs.nixheal.nixpkgs.${input}.argName = \"${toString set.argName}\" would shadow a module argument";
+        }) cfg.nixpkgs;
+        warnings =
+          lib.optional (!(options.nixpkgs ? overlays))
+            "programs.nixheal cannot add its overlay to a read-only nixpkgs (nixosModules.readOnlyPkgs); add nixheal.lib.mkOverlay to the pkgs you pass in, or its pins do not apply";
+      }
+      // lib.optionalAttrs (options.nixpkgs ? overlays) {
+        nixpkgs.overlays = lib.mkAfter [
+          (overlay cfg.input (if options.nixpkgs.pkgs.isDefined then null else config.nixpkgs.config))
+        ];
+      }
+    ))
     (lib.mkIf (cfg.enable && runsNixheal) {
       environment.systemPackages = [
         cfg.package
@@ -203,6 +203,7 @@ in
         };
         serviceConfig = {
           Type = "oneshot";
+          TimeoutStartSec = up.timeout;
           User = up.user;
           RuntimeDirectory = "nixheal";
           ExecStart = lib.escapeShellArgs (

@@ -65,7 +65,7 @@ pub fn strip_version(name: &str) -> &str {
 }
 
 /// The line of a nix error that says what went wrong. Messages open with a
-/// bare "error:" and a trace of "… while evaluating" frames; a failed assertion
+/// bare "error:" and a trace of "while evaluating" frames (each led by an ellipsis); a failed assertion
 /// lists its reasons as "- " items after "Failed assertions:".
 pub fn headline(msg: &str) -> String {
     let msg = strip_ansi(msg);

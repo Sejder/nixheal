@@ -41,6 +41,34 @@ impl Restore {
 
 static ARMED: Mutex<Option<Restore>> = Mutex::new(None);
 static HANDLER: Once = Once::new();
+static CHILDREN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Remember a running nix, so an interrupt stops it too: a SIGTERM sent to
+/// nixheal alone (kill, timeout) does not reach it otherwise.
+pub fn track(pid: u32) {
+    if let Ok(mut c) = CHILDREN.lock() {
+        c.push(pid);
+    }
+}
+
+pub fn untrack(pid: u32) {
+    if let Ok(mut c) = CHILDREN.lock() {
+        c.retain(|p| *p != pid);
+    }
+}
+
+fn stop_children() {
+    if let Ok(c) = CHILDREN.lock() {
+        for pid in c.iter() {
+            if let Ok(pid) = i32::try_from(*pid) {
+                // SAFETY: kill(2) only sends a signal; a stale pid is harmless here.
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+            }
+        }
+    }
+}
 
 /// Put the files back on SIGINT or SIGTERM while `restore` is armed, so an
 /// interrupted run, a Ctrl-C or a shutdown during the timer, leaves the
@@ -48,9 +76,11 @@ static HANDLER: Once = Once::new();
 pub fn arm(restore: Restore) {
     HANDLER.call_once(|| {
         let _ = ctrlc::set_handler(|| {
-            if let Ok(mut armed) = ARMED.lock()
-                && let Some(r) = armed.take()
-            {
+            stop_children();
+            // Exit while still holding the lock, so a write the main thread
+            // is waiting to make in `critical` never lands after the restore.
+            let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(r) = armed.take() {
                 match r.apply() {
                     Ok(()) => log::change("interrupted; restored flake.lock and pins.json"),
                     Err(e) => log::warn(&format!("interrupted; restoring failed: {e:#}")),

@@ -22,14 +22,7 @@ let
       inherit input nixpkgsConfig;
     };
 
-  platformArgs =
-    if pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system then
-      { inherit (pkgs.stdenv.hostPlatform) system; }
-    else
-      {
-        localSystem = pkgs.stdenv.buildPlatform.system;
-        crossSystem = pkgs.stdenv.hostPlatform.system;
-      };
+  platformArgs = import ./platform.nix pkgs.stdenv.buildPlatform pkgs.stdenv.hostPlatform;
 
   extraSets = lib.mapAttrs (
     input: set:
@@ -125,6 +118,14 @@ in
           ;
       };
     })
+    (lib.mkIf (cfg.enable && cfg.autoUpgrade.enable && !inNixos && !runsNixheal) {
+      assertions = [
+        {
+          assertion = false;
+          message = "programs.nixheal.autoUpgrade needs this home (${cfg.name}) in programs.nixheal.homes";
+        }
+      ];
+    })
     (lib.mkIf (cfg.enable && cfg.autoUpgrade.enable && runsNixheal) {
       assertions = [
         {
@@ -145,6 +146,7 @@ in
         };
         Service = {
           Type = "oneshot";
+          TimeoutStartSec = cfg.autoUpgrade.timeout;
           Environment = [
             "PATH=${config.home.profileDirectory}/bin:${
               lib.makeBinPath [

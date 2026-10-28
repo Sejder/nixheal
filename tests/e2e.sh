@@ -119,7 +119,7 @@ EOF
 mkdir -p "$toy" "$sys"
 git -C "$toy" init -q -b main
 cat >"$toy/default.nix" <<'EOF'
-{ system, config ? { }, overlays ? [ ] }:
+{ localSystem ? { inherit system; }, system ? localSystem.system, crossSystem ? null, config ? { }, overlays ? [ ] }:
 let
   state = import ./state.nix;
   mk = name: pname: deps: script: derivation {
@@ -178,14 +178,46 @@ in
 fix (builtins.foldl' extend base overlays)
 EOF
 
-cp "$repo/nix/overlay.nix" "$sys/overlay.nix"
+cp "$repo/nix/overlay.nix" "$repo/nix/platform.nix" "$sys/"
 cat >"$sys/flake.nix" <<EOF
 {
   inputs.toypkgs = { url = "git+file://$toy"; flake = false; };
-  outputs = { self, toypkgs }:
+  inputs.toypkgs2 = { url = "git+file://$toy"; flake = false; };
+  outputs = { self, toypkgs, toypkgs2 }:
     let
       system = "$system";
       mkHost = name: paths: mkHostOf "hosts" name paths { };
+      ov = name: input: import ./overlay.nix { pins = ./pins.json; kind = "hosts"; inherit name input; };
+      toplevel = name: extra: paths: derivation ({
+        name = "toplevel-\${name}";
+        inherit system paths;
+        builder = "/bin/sh";
+        args = [ "-c" "echo \$paths > \$out" ];
+      } // extra);
+      mkTwo = name: paths:
+        let
+          pkgs = import toypkgs { inherit system; overlays = [ (ov name "toypkgs") ]; };
+          pkgs2 = import toypkgs2 { inherit system; overlays = [ (ov name "toypkgs2") ]; };
+        in {
+          config.programs.nixheal = {
+            enable = true;
+            inherit name;
+            pinsFile = ./pins.json;
+            packageSets = { toypkgs = pkgs; toypkgs2 = pkgs2; };
+          };
+          config.system.build.toplevel = toplevel name { } (paths pkgs pkgs2);
+        };
+      mkEmbedding = name: paths:
+        let pkgs = import toypkgs { inherit system; overlays = [ (ov name "toypkgs") ]; };
+        in {
+          config.programs.nixheal = {
+            enable = true;
+            inherit name;
+            pinsFile = ./pins.json;
+            packageSets.toypkgs = pkgs;
+          };
+          config.system.build.toplevel = toplevel name { flakeSource = self; } (paths pkgs);
+        };
       mkHostOf = kind: name: paths: settings:
         let
           pkgs = import toypkgs {
@@ -222,6 +254,8 @@ cat >"$sys/flake.nix" <<EOF
       nixosConfigurations.a = mkHost "a" (p: [ p.hello p.gone ]);
       nixosConfigurations.b = mkHost "b" (p: [ p.app p.hello p.linux ]);
       nixosConfigurations.c = mkHost "c" (p: [ p.tool p.webui p.fetched ]);
+      nixosConfigurations.e = mkTwo "e" (p: p2: [ p2.app ]);
+      nixosConfigurations.d = mkEmbedding "d" (p: [ p.hello ]);
       homeConfigurations.alice = mkHostOf "homes" "alice" (p: [ p.hello ]) { };
       nixosConfigurations.misnamed = mkHostOf "hosts" "misnamed" (p: [ p.hello ]) { name = "other"; };
       nixosConfigurations.elsewhere = mkHostOf "hosts" "elsewhere" (p: [ p.hello ]) { pinsFile = ./sub/pins.json; };
@@ -231,7 +265,7 @@ EOF
 write_config ""
 
 git -C "$sys" init -q -b main
-git -C "$sys" add flake.nix overlay.nix
+git -C "$sys" add flake.nix overlay.nix platform.nix
 revision ok false 1 ok
 nix flake lock "$sys"
 git -C "$sys" add flake.lock
@@ -254,8 +288,8 @@ expect_pins a "toypkgs.gone"
 expect_pins b "toypkgs.app"
 [ "$(field a toypkgs gone reason)" = eval ] || fail "gone on a should be an eval pin"
 [ "$(field b toypkgs app reason)" = build ] || fail "app on b should be a build pin"
-git -C "$sys" log -1 --format=%B | grep -qF "pinned host b: toypkgs.app" || fail "commit message lacks the b pin"
-git -C "$sys" log -1 --format=%B | grep -qF "pinned host a: toypkgs.gone" || fail "commit message lacks the a pin"
+git -C "$sys" log -1 --format=%B | grep -qF "pinned host b: app (toypkgs)" || fail "commit message lacks the b pin"
+git -C "$sys" log -1 --format=%B | grep -qF "pinned host a: gone (toypkgs)" || fail "commit message lacks the a pin"
 [ "$(nh_calls)" -gt "$before_calls" ] || fail "nh was not called on r2"
 expect_built a hello-2
 expect_built b hello-2
@@ -277,8 +311,8 @@ expect_switched_to_built a
 step "r3: libfoo is fixed, gone is still removed"
 revision fixed true 3 ok
 nixheal_ switch --update || fail "nixheal update gave up on r3"
-expect_log "unpinned host b: toypkgs.app: builds again"
-expect_log "still failing host a: toypkgs.gone"
+expect_log "unpinned host b: app (toypkgs): builds again"
+expect_log "host a: gone still fails; keeping its pin in toypkgs"
 expect_pins a "toypkgs.gone"
 expect_pins b ""
 [ "$(field a toypkgs gone since)" = "$since_gone" ] || fail "gone lost its original date"
@@ -295,13 +329,13 @@ r3_rev="$(nix eval --raw --impure --expr "(builtins.fromJSON (builtins.readFile 
 [ "$held_rev" = "$r3_rev" ] || fail "b is held on $held_rev, expected the r3 lock $r3_rev"
 expect_built a hello-4
 nixheal_ status || fail "nixheal status failed"
-expect_log "(held)"
+expect_log "whole host held"
 
 step "r5: linux is fixed and gone is back: b is released, a unpins"
 revision fixed false 5 ok
 nixheal_ switch --update || fail "nixheal update gave up on r5"
 expect_log "released host b"
-expect_log "unpinned host a: toypkgs.gone: builds again"
+expect_log "unpinned host a: gone (toypkgs): builds again"
 expect_pins a ""
 expect_pins b ""
 [ -z "$(held_reason b)" ] || fail "b is still held"
@@ -331,8 +365,8 @@ write_config ""
 step "r6 dry run, quiet: shows the hello pins and nothing else, writes nothing"
 nixheal_ -q switch --update --dry-run || fail "the dry run gave up"
 reject_log "round 1:"
-expect_log "(dry run) pinned host a: toypkgs.hello"
-expect_log "(dry run) pinned host b: toypkgs.hello"
+expect_log "(dry run) pinned host a: hello (toypkgs)"
+expect_log "(dry run) pinned host b: hello (toypkgs)"
 cmp -s "$sys/flake.lock" "$work/before.lock" || fail "the dry run changed flake.lock"
 cmp -s "$sys/pins.json" "$work/before.json" || fail "the dry run changed pins.json"
 [ "$(commits)" = "$before_commits" ] || fail "the dry run committed"
@@ -360,7 +394,7 @@ ln -sfn /nix/store/not-nixheals "$work/roots/result"
 ln -sfn /nix/store/an-old-host "$work/roots/nixheal-host-old"
 nixheal_ build --update --hold-local --no-commit --gc-roots "$work/roots" || fail "the fleet run gave up"
 [ -L "$work/roots/result" ] || fail "--gc-roots removed a root nixheal did not make"
-[ -L "$work/roots/nixheal-host-old" ] && fail "--gc-roots kept the root of a host no longer configured"
+[ -L "$work/roots/nixheal-host-old" ] || fail "--gc-roots removed a root this flake did not make"
 expect_log "held host a on its last good lock"
 reject_log "giving up on host a"
 case "$(held_reason a)" in *"gone fails and is on the never-pin list"*) ;; *) fail "a should be held for gone: $(held_reason a)" ;; esac
@@ -371,6 +405,16 @@ git -C "$sys" diff --quiet -- flake.lock && fail "the fleet run restored flake.l
 [ -L "$work/roots/nixheal-host-b" ] || fail "no GC root for b"
 [ -e "$work/roots/nixheal-host-a" ] && fail "a GC root for the held host a"
 expect_log "rooted 1 system(s)"
+cp "$sys/flake.lock" "$work/fleet.lock"
+cp "$sys/pins.json" "$work/fleet.json"
+write_config "" "" '"a"'
+nixheal_ build --hold-local --no-commit --gc-roots "$work/roots" || fail "the fleet run for a alone gave up"
+[ -L "$work/roots/nixheal-host-a" ] || fail "no GC root for a"
+[ -L "$work/roots/nixheal-host-b" ] && fail "--gc-roots kept this flake's root of b, which is no longer configured"
+expect_log "removed the root nixheal-host-b"
+[ -L "$work/roots/nixheal-host-old" ] || fail "--gc-roots removed a root this flake did not make"
+cp "$work/fleet.lock" "$sys/flake.lock"
+cp "$work/fleet.json" "$sys/pins.json"
 write_config ""
 
 step "merge: an entry from a newer lock replaces b, one from an older lock does not"
@@ -525,7 +569,7 @@ step "--max-new-pins: a host needing too many new pins is held"
 write_config '"linux"'
 revision broken false broken ok
 nixheal_ build --update --hold-local --no-commit --max-new-pins 1 || fail "the run with --max-new-pins 1 gave up"
-case "$(held_reason b)" in *"more than 1 new pins"*) ;; *) fail "b should be held for needing two pins: $(held_reason b)" ;; esac
+case "$(held_reason b)" in *"more than 1 new pin(s)"*) ;; *) fail "b should be held for needing two pins: $(held_reason b)" ;; esac
 expect_pins a "toypkgs.hello"
 git -C "$sys" checkout -q -- flake.lock pins.json
 write_config ""
@@ -589,12 +633,14 @@ revision fixed false 21 ok
 before_commits="$(commits)"
 nixheal_ build --update || fail "the build without commit gave up"
 [ "$(commits)" = "$before_commits" ] || fail "a run without commit committed"
-expect_log "left flake.lock and pins.json uncommitted (pass --commit"
+expect_log "flake.lock and pins.json changed but not committed"
 git -C "$sys" diff --quiet -- flake.lock && fail "flake.lock was not updated"
 nixheal_ build --commit || fail "the build with --commit gave up"
 [ "$(commits)" -gt "$before_commits" ] || fail "--commit did not commit"
+expect_log 'committed'
+expect_log '"nixheal: update flake.lock"'
 nixheal_ build --update --commit --no-commit || fail "the build with --commit --no-commit gave up"
-expect_log "left flake.lock and pins.json uncommitted"
+expect_log "flake.lock and pins.json unchanged"
 git -C "$sys" checkout -q -- flake.lock pins.json
 write_config ""
 
@@ -607,7 +653,7 @@ write_config ""
 
 step "--update with an input the flake does not have is refused"
 if nixheal_ build --update nixpkgs; then fail "--update nixpkgs should be refused"; fi
-expect_log "--update nixpkgs: not an input of flake.lock (its inputs: toypkgs)"
+expect_log "--update nixpkgs: not an input of flake.lock (its inputs: toypkgs, toypkgs2)"
 reject_log "round 1"
 
 step "merge: a missing file or one that is not a pins file is an error, and held entries come through"
@@ -630,8 +676,8 @@ grep -qF "flake $sys" "$work/stdout" || fail "status does not name the flake"
 "$nixheal" pin hello --host b --input toypkgs --config "$config" 2>"$log" || fail "pinning hello on b failed: $(cat "$log")"
 expect_log "it stays until 'nixheal clear hello --host b'"
 "$nixheal" status --config "$config" >"$work/stdout" 2>"$log" || fail "status failed"
-grep -qE '^TARGET +PIN +REASON +SINCE$' "$work/stdout" || fail "status has no header: $(cat "$work/stdout")"
-grep -qE '^host b +toypkgs.hello +pinned by hand +' "$work/stdout" || fail "status lacks the manual pin: $(cat "$work/stdout")"
+grep -qE '^TARGET +PACKAGE \(SETS\) +REASON +SINCE$' "$work/stdout" || fail "status has no header: $(cat "$work/stdout")"
+grep -qE '^host b +hello \(toypkgs\) +pinned by hand +' "$work/stdout" || fail "status lacks the manual pin: $(cat "$work/stdout")"
 if "$nixheal" why hello --config "$config" 2>"$log"; then fail "why hello on a succeeded"; fi
 expect_log "hello is not pinned on host a; it is pinned on host b (pass --host b)"
 if "$nixheal" clear --held hello --config "$config" 2>"$log"; then fail "clear --held with an attr was accepted"; fi
@@ -646,12 +692,84 @@ if "$nixheal" pin hello --flake "$work/nopins" --config "$config" 2>"$log"; then
 expect_log "no flake.lock in $work/nopins"
 git -C "$sys" checkout -q -- pins.json
 
+step "two package sets: a set that did not move is skipped, the one that did is pinned"
+write_config "" "" '"e"'
+revision fixed false 30 ok
+nixheal_ build --update || fail "e did not build"
+revision broken false 31 ok
+nixheal_ build --update toypkgs || fail "updating only the unused set gave up"
+expect_pins e ""
+nixheal_ build --update toypkgs2 || fail "updating the used set gave up"
+expect_log "e: not pinning toypkgs.app fails at the last good toypkgs too"
+expect_pins e "toypkgs2.app"
+[ -z "$(held_reason e)" ] || fail "e was held although pinning toypkgs2 fixed it: $(held_reason e)"
+
+step "two package sets: one failure is one pin group, retried together and not reported fixed while it fails"
+revision fixed false 32 ok
+nixheal_ build --update || fail "the fix for e gave up"
+expect_pins e ""
+revision broken false 33 ok
+nixheal_ build --update || fail "breaking both sets gave up"
+expect_log "pinned host e: app (toypkgs, toypkgs2)"
+expect_log "done: 1 built, 1 pinned"
+expect_pins e "toypkgs.app toypkgs2.app"
+"$nixheal" status --config "$config" >"$work/stdout" 2>/dev/null
+grep -qE '^host e +app \(toypkgs, toypkgs2\) ' "$work/stdout" || fail "status does not show one row for app: $(cat "$work/stdout")"
+revision broken false 34 ok
+nixheal_ build --update toypkgs || fail "moving the unused set gave up"
+reject_log "unpinned"
+expect_log "keeping its pin in toypkgs (since"
+expect_pins e "toypkgs.app toypkgs2.app"
+revision broken false 35 ok
+nixheal_ build --update toypkgs2 || fail "moving the used set gave up"
+[ -z "$(held_reason e)" ] || fail "e was held while app still fails: $(held_reason e)"
+expect_pins e "toypkgs.app toypkgs2.app"
+revision fixed false 36 ok
+nixheal_ build --update || fail "fixing app gave up"
+expect_log "unpinned host e: app (toypkgs, toypkgs2): builds again"
+expect_pins e ""
+
+step "a system that embeds the flake's source is built again with the final pins.json"
+write_config "" "" '"d", "b"'
+revision fixed false 37 ok
+nixheal_ build --update --no-commit || fail "d and b did not build"
+git -C "$sys" commit -qam "d builds"
+revision broken false 38 ok
+nixheal_ build --update --no-commit --gc-roots "$work/roots2" || fail "the run with d gave up"
+expect_log "building 1 system(s) again with the final pins.json"
+want="$(nix eval --raw "$sys#nixosConfigurations.d.config.system.build.toplevel.outPath")"
+[ "$(readlink "$work/roots2/nixheal-host-d")" = "$want" ] || fail "d's root is not the system for the final pins.json"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
+
+step "a commit that fails restores flake.lock and pins.json"
+revision fixed false 39 ok
+cp "$sys/flake.lock" "$work/before.lock"
+if GIT_AUTHOR_NAME= GIT_COMMITTER_NAME= nixheal_ build --update --commit; then fail "a failing commit was not an error"; fi
+expect_log "git commit failed"
+expect_log "restored flake.lock and pins.json"
+cmp -s "$sys/flake.lock" "$work/before.lock" || fail "flake.lock was not restored after the failed commit"
+
+step "--fail-on-hold exits with 3 when a host is held"
+write_config '"linux"'
+revision fixed false 40 broken
+rc=0
+nixheal_ build --update --no-commit --fail-on-hold || rc=$?
+[ "$rc" = 3 ] || fail "--fail-on-hold exited with $rc, not 3"
+expect_log "1 target(s) held; exiting with 3"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
+
+step "--host with a name that is not configured is refused"
+if "$nixheal" pin hello --host zzz --input toypkgs --config "$config" 2>"$log"; then fail "pin --host zzz succeeded"; fi
+expect_log "host zzz is not a configured host (configured: a, b); check --host"
+
 step "a flake in a subdirectory of its repository"
 repo2="$work/repo2"
 mkdir -p "$repo2/nixos"
 git -C "$repo2" init -q -b main
-cp "$sys/flake.nix" "$sys/overlay.nix" "$repo2/nixos/"
-git -C "$repo2" add nixos/flake.nix nixos/overlay.nix
+cp "$sys/flake.nix" "$sys/overlay.nix" "$sys/platform.nix" "$repo2/nixos/"
+git -C "$repo2" add nixos/flake.nix nixos/overlay.nix nixos/platform.nix
 nix flake lock "$repo2/nixos" 2>/dev/null
 git -C "$repo2" add nixos/flake.lock
 git -C "$repo2" commit -qm "a flake in nixos/"
