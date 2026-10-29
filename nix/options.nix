@@ -85,6 +85,17 @@ in
     example = [ "cuda*" ];
     description = "Attributes never to pin, on top of the built-in list. A trailing * matches a prefix.";
   };
+  donors = mkOption {
+    type = types.listOf types.str;
+    default = [ ];
+    example = [ "nixpkgs-stable" ];
+    description = "Flake inputs, as named in flake.lock, that a failed package may be pinned to instead of the revision it last built with, when one has a newer version of it that is already built or in a substituter. Only for packages nothing else in the system depends on.";
+  };
+  retrySameDerivationAfterDays = mkOption {
+    type = types.ints.unsigned;
+    default = 7;
+    description = "When an input moves but a pinned package's derivation is still the one that failed, retry it only once it was last tried this many days ago; 0 retries it whenever its input moves.";
+  };
   switcher = mkOption {
     type = types.enum [
       "nh"

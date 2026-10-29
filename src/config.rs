@@ -34,6 +34,14 @@ pub struct Config {
     /// nixos-rebuild for hosts and home-manager for homes.
     #[serde(default = "default_switcher")]
     pub switcher: String,
+    /// Flake inputs a failed package may be pinned to when they have a newer
+    /// version of it that is already built.
+    #[serde(default)]
+    pub donors: Vec<String>,
+    /// Retry a package whose drv the update did not change only once it was
+    /// last tried this many days ago; 0 retries it whenever its input moves.
+    #[serde(default = "default_retry_same_after_days")]
+    pub retry_same_derivation_after_days: i64,
 }
 
 fn default_switcher() -> String {
@@ -42,6 +50,10 @@ fn default_switcher() -> String {
 
 fn default_warn_after_days() -> i64 {
     14
+}
+
+fn default_retry_same_after_days() -> i64 {
+    7
 }
 
 pub const ROOT_PREFIX: &str = "nixheal-";

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Retries that cannot help are skipped, and pins can move forward to a donor:
+
+- A pinned build failure was retried every time its input moved, even when
+  the update left the package's derivation exactly as it was, so the same
+  failing build (a test hanging for its full timeout, say) ran again on every
+  run. Each build pin now records the package's own drv (`"rootDrv"`); when
+  its input moves and the package is still that drv, it is not built again
+  until it changes or `programs.nixheal.retrySameDerivationAfterDays` (default
+  7; `0` restores the old behaviour) have passed since it was last tried
+  (`"tried"`). `nixheal retry` still retries it at once. Pins made before this
+  are retried once more, as before, and record it then.
+- New `programs.nixheal.donors`: flake inputs, such as a stable nixpkgs next
+  to an unstable one, that a failed package may be pinned to instead of the
+  revision it last built with. A donor is used when it has a newer version of
+  the package whose copy is already in the store or a substituter, so the pin
+  gains the newer version and builds nothing. Existing pins move to a donor
+  once one has such a copy, and back to the pin they replaced if the donor's
+  copy fails. Only packages nothing else in the system depends on are taken
+  from a donor (`"leaf"` in `pins.json`, recorded from the next failure on);
+  `status` and `why` show the donor (`"donor"`).
+
 Pinned packages keep your overlays:
 
 - A pinned package was imported from the old nixpkgs without your overlays,

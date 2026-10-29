@@ -185,6 +185,30 @@ gone, otherwise it comes back with its original date. `nixheal retry` asks
 for the same without waiting for the input to move. Manual pins
 (`nixheal pin`) are never retried.
 
+A build failure is only retried when there is something new to try: the pin
+records the package's own derivation, and when its input moves but the
+package evaluates to that same derivation (the update changed other packages
+only), it is not built again. It is retried once the derivation changes, or
+once `retrySameDerivationAfterDays` (7) have passed since it was last tried,
+for a failure that may have been a flaky test; `0` retries on every move.
+
+**Donor.** An input listed in `programs.nixheal.donors`, such as a stable
+nixpkgs next to an unstable one, that a failed package may be taken from
+instead of the revision it last built with. When a package fails and a donor
+has a newer version of it whose copy is already in the store or one of the
+substituters, the pin is made to the donor: it builds nothing and is not a
+step back. An existing pin moves to a donor once one has such a copy, and goes
+back to the pin it replaced if the donor's copy fails. Only a package nothing
+else in the system depends on is taken from a donor, since its copy brings the
+donor's libraries along. The input must be in `flake.lock`; it does not have
+to be used by your configuration:
+
+```nix
+inputs.nixpkgs-stable.url = "https://channels.nixos.org/nixos-26.05/nixexprs.tar.zst";
+
+programs.nixheal.donors = [ "nixpkgs-stable" ];
+```
+
 ## Commands
 
 The verbs follow `nh` and `nixos-rebuild`:
@@ -261,7 +285,8 @@ required, the rest default as the module options do):
 ```json
 { "kind": "nixos", "self": "laptop", "flake": "/home/alice/nixos",
   "hosts": ["laptop"], "homes": [], "input": "nixpkgs", "warnAfterDays": 14,
-  "deny": [], "quiet": false, "commit": false, "switcher": "nh" }
+  "deny": [], "quiet": false, "commit": false, "switcher": "nh",
+  "donors": [], "retrySameDerivationAfterDays": 7 }
 ```
 
 ## Options
@@ -283,6 +308,8 @@ required, the rest default as the module options do):
 | `quiet` | `false` | always run as `--quiet` |
 | `commit` | `false` | commit `flake.lock` and `pins.json` after each run, as with `--commit` |
 | `pinnedOverlays` | `true` | apply your own nixpkgs overlays to pinned packages (see below) |
+| `donors` | `[ ]` | flake inputs a failed package may be pinned to when one has a newer, already built copy of it (see [Donor](#concepts)) |
+| `retrySameDerivationAfterDays` | `7` | retry a build failure whose derivation an update did not change only after this many days; `0` on every move of its input |
 | `package` | this flake's | the nixheal package |
 | `nixpkgs.<input>` | `{ }` | another nixpkgs to import with pins applied: `source`, `config` (default: this host's `nixpkgs.config`), `argName` |
 | `packageSets` | read-only | every package set nixheal pins on this machine, keyed by input |

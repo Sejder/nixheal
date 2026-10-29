@@ -151,9 +151,106 @@ pub fn evaluates_at(locked: &Value, system: &str, attr: &str) -> Result<bool> {
     Ok(nix::eval_expr(&expr)?.as_bool().unwrap_or(false))
 }
 
+/// The nix expression that turns the package set `p` into `attr`'s drv, out
+/// path and version, or null when it is not a derivation there.
+pub fn copy_expr(attr: &str) -> String {
+    format!(
+        r#"let r = builtins.tryEval (if builtins.hasAttr "{attr}" p then let a = builtins.getAttr "{attr}" p; in {{ drv = a.drvPath; out = a.outPath; version = (builtins.parseDrvName a.name).version; }} else null); in if r.success then r.value else null"#
+    )
+}
+
+/// `attr`'s drv, out path and version in the nixpkgs at `locked`, imported
+/// plainly for `system`; None when it is not a derivation there.
+pub fn copy_at(locked: &Value, system: &str, attr: &str) -> Result<Option<Value>> {
+    if !is_attr_name(attr)
+        || !system
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!("refusing to evaluate unexpected name {attr:?} for {system:?}");
+    }
+    let json = serde_json::to_string(locked)?;
+    if json.contains("''") || json.contains("${") {
+        bail!("locked node cannot be quoted safely");
+    }
+    let expr = format!(
+        r#"let p = import (builtins.fetchTree (builtins.fromJSON ''{json}'')) {{ system = "{system}"; config.allowUnfree = true; }}; in {}"#,
+        copy_expr(attr)
+    );
+    let v = nix::eval_expr(&expr)?;
+    Ok((!v.is_null()).then_some(v))
+}
+
+/// The next component of a version string after `*i`, as nix splits them:
+/// a run of digits or a run of other characters, separated by . and -.
+fn next_component<'a>(s: &'a str, i: &mut usize) -> &'a str {
+    let b = s.as_bytes();
+    while *i < b.len() && (b[*i] == b'.' || b[*i] == b'-') {
+        *i += 1;
+    }
+    let start = *i;
+    if *i < b.len() && b[*i].is_ascii_digit() {
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+    } else {
+        while *i < b.len() && !(b[*i].is_ascii_digit() || b[*i] == b'.' || b[*i] == b'-') {
+            *i += 1;
+        }
+    }
+    &s[start..*i]
+}
+
+fn component_lt(c1: &str, c2: &str) -> bool {
+    let n1 = c1.parse::<u64>().ok();
+    let n2 = c2.parse::<u64>().ok();
+    match (n1, n2) {
+        (Some(a), Some(b)) => a < b,
+        _ if c1.is_empty() && n2.is_some() => true,
+        _ if c1 == "pre" && c2 != "pre" => true,
+        _ if c2 == "pre" => false,
+        (_, Some(_)) => true,
+        (Some(_), _) => false,
+        _ => c1 < c2,
+    }
+}
+
+/// builtins.compareVersions: how version `a` orders against `b`.
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() || j < b.len() {
+        let c1 = next_component(a, &mut i);
+        let c2 = next_component(b, &mut j);
+        if component_lt(c1, c2) {
+            return std::cmp::Ordering::Less;
+        }
+        if component_lt(c2, c1) {
+            return std::cmp::Ordering::Greater;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versions_order_as_nix_orders_them() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_versions("2026.10.1", "2026.10.3"), Less);
+        assert_eq!(compare_versions("2026.10.3", "2026.10.3"), Equal);
+        assert_eq!(compare_versions("2026.10.10", "2026.10.3"), Greater);
+        assert_eq!(compare_versions("1.0", "1.0.1"), Less);
+        assert_eq!(compare_versions("2.3a", "2.3.1"), Less);
+        assert_eq!(compare_versions("1.0pre1", "1.0"), Less);
+        assert_eq!(compare_versions("1.0-rc1", "1.0-rc2"), Less);
+        assert_eq!(
+            compare_versions("0-unstable-2026-10-01", "0-unstable-2026-09-30"),
+            Greater
+        );
+        assert_eq!(compare_versions("", "1"), Less);
+    }
 
     #[test]
     fn denylist() {

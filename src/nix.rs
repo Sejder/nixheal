@@ -324,6 +324,43 @@ pub fn out_path(drv: &str) -> Result<String> {
     })
 }
 
+/// The substituters nix uses here, as store URLs.
+fn substituters() -> &'static [String] {
+    static SUBSTITUTERS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    SUBSTITUTERS.get_or_init(|| {
+        let out = command()
+            .args(["config", "show", "substituters"])
+            .stdin(Stdio::null())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    })
+}
+
+/// Whether `out` is in the store already or one of the substituters has it,
+/// so that using it builds nothing.
+pub fn available(out: &str) -> bool {
+    let valid = |store: Option<&str>| {
+        let mut cmd = command();
+        cmd.arg("path-info");
+        if let Some(s) = store {
+            cmd.args(["--store", s]);
+        }
+        cmd.arg(out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    valid(None) || substituters().iter().any(|s| valid(Some(s)))
+}
+
 pub fn eval_expr(expr: &str) -> Result<Value> {
     let out = command()
         .args(["eval", "--json", "--expr", expr])

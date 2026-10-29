@@ -144,6 +144,10 @@ mod tests {
             error: None,
             overlays: None,
             checked_nar_hash: String::new(),
+            root_drv: None,
+            tried: None,
+            donor: None,
+            leaf: false,
         }
     }
 

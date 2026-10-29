@@ -59,6 +59,22 @@ pub struct Pin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlays: Option<bool>,
     pub checked_nar_hash: String,
+    /// For a build failure, the pinned package's own drv when it failed: an
+    /// input that moves without changing it is not retried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_drv: Option<String>,
+    /// The day the package was last built and failed, when that was after
+    /// `since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tried: Option<String>,
+    /// The donor input `locked` comes from, when it is not the pinned input's
+    /// own history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor: Option<String>,
+    /// Whether no other package in the system depends on the pinned one, so
+    /// a donor's copy may replace it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub leaf: bool,
 }
 
 impl Pin {
@@ -355,6 +371,10 @@ mod tests {
             error: None,
             overlays: None,
             checked_nar_hash: "sha256-Y".into(),
+            root_drv: None,
+            tried: None,
+            donor: None,
+            leaf: false,
         }
     }
 

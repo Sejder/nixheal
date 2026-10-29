@@ -43,6 +43,11 @@ pub struct Engine {
     pub max_new_pins: usize,
     pub warn_after_days: i64,
     pub today: i64,
+    /// Inputs a failed leaf package may be pinned to instead.
+    pub donors: Vec<String>,
+    pub retry_same_after_days: i64,
+    /// Evaluated copies of packages, by target, attr, revision and overlays.
+    pub copies: std::cell::RefCell<HashMap<String, Option<Copy>>>,
 }
 
 #[derive(Debug, Default)]
@@ -84,10 +89,25 @@ struct Wanted {
     members: Vec<(String, String)>,
     reason: Reason,
     failed_drv: Option<String>,
+    /// For a build failure, the drv of the package the members name.
+    root_drv: Option<String>,
+    /// Nothing else in the system depends on the package.
+    leaf: bool,
     /// What failed, for messages: the failed derivation's name, or the error.
     cause: String,
     trail: Vec<String>,
     error: Option<String>,
+}
+
+/// A package as one nixpkgs builds it for a target.
+#[derive(Debug, Clone)]
+pub struct Copy {
+    drv: String,
+    out: String,
+    version: String,
+    /// Whether the target's overlays were applied; None when it was imported
+    /// plainly, for a target without importPinned.
+    overlays: Option<bool>,
 }
 
 struct State {
@@ -100,6 +120,8 @@ struct State {
     good_pins: Option<Entry>,
     old_lock: Lock,
     retrying: BTreeMap<(String, String), Pin>,
+    /// Pins moved to a donor in this run, with the pin each replaced.
+    upgrading: BTreeMap<(String, String), Pin>,
     inputs: Vec<String>,
     drv: Option<String>,
     /// The pins file the builds saw in the round this target built in, and
@@ -113,6 +135,13 @@ struct State {
 impl Engine {
     pub fn run(&self) -> Result<Report> {
         self.check_targets()?;
+        for donor in &self.donors {
+            if self.new_lock.locked(donor).is_none() {
+                log::warn(&format!(
+                    "donor {donor} is not an input of flake.lock, so nothing is pinned to it"
+                ));
+            }
+        }
         let original = PinsFile::load(&self.pins_path)?;
         let mut states: Vec<State> = self
             .targets
@@ -248,6 +277,7 @@ impl Engine {
         // failure go with it, or the package would build only because a
         // sibling still pins it, and look fixed when it is not.
         let mut retrying = BTreeMap::new();
+        let system = std::cell::OnceCell::new();
         let moved: Vec<(String, String)> = entry
             .iter()
             .filter(|(i, _, p)| {
@@ -261,10 +291,25 @@ impl Engine {
             if group.is_empty() {
                 continue;
             }
-            let why = if entry
+            let asked = entry
                 .get(&input, &attr)
-                .is_some_and(|p| p.checked_nar_hash.is_empty())
-            {
+                .is_some_and(|p| p.checked_nar_hash.is_empty());
+            if !asked && let Some(until) = self.unchanged(target, &system, &entry, &group, &attr) {
+                for i in &group {
+                    if let (Some(checked), Some(pin)) = (
+                        self.new_lock.nar_hash(i),
+                        entry.pins.get_mut(i).and_then(|s| s.get_mut(&attr)),
+                    ) {
+                        pin.checked_nar_hash = checked;
+                    }
+                }
+                log::info(&format!(
+                    "{target}: {attr} ({}): {input} moved, but {attr} is still the derivation that failed, so it is not built again; it is retried once that changes, or from {until} (nixheal retry {attr} retries it now)",
+                    group.join(", ")
+                ));
+                continue;
+            }
+            let why = if asked {
                 "a retry was asked for (nixheal retry)".to_string()
             } else {
                 format!("{input} moved since it was pinned")
@@ -289,7 +334,7 @@ impl Engine {
         };
         let old_lock = self.last_good.get(target).unwrap_or(&self.old_lock).clone();
 
-        Ok(State {
+        let mut st = State {
             target: target.clone(),
             base,
             entry,
@@ -298,13 +343,181 @@ impl Engine {
             good_pins: self.last_good_pins.get(target).cloned(),
             old_lock,
             retrying,
+            upgrading: BTreeMap::new(),
             inputs,
             drv: None,
             built_with: None,
-            system: std::cell::OnceCell::new(),
+            system,
             status,
             new_pins: 0,
-        })
+        };
+        if st.status == Status::Active {
+            self.upgrade(&mut st);
+        }
+        Ok(st)
+    }
+
+    /// For a group of pins from one build failure whose inputs moved: the day
+    /// from which it is retried anyway, when the package's drv is still the
+    /// one that failed in every moved input. None when it should be retried
+    /// now, or nixheal cannot tell.
+    fn unchanged(
+        &self,
+        target: &Target,
+        system: &std::cell::OnceCell<String>,
+        entry: &Entry,
+        group: &[String],
+        attr: &str,
+    ) -> Option<String> {
+        if self.retry_same_after_days <= 0 {
+            return None;
+        }
+        let mut last = i64::MIN;
+        for input in group {
+            let pin = entry.get(input, attr)?;
+            if pin.reason != Reason::Build {
+                return None;
+            }
+            let root = pin.root_drv.as_deref()?;
+            let tried = date::parse(pin.tried.as_deref().unwrap_or(&pin.since))?;
+            last = last.max(tried);
+            if self.new_lock.nar_hash(input).as_deref() == Some(pin.checked_nar_hash.as_str()) {
+                continue;
+            }
+            let locked = self.new_lock.locked(input)?;
+            let copy = self.copy(target, system, attr, &locked, true)?;
+            if copy.drv != root {
+                return None;
+            }
+        }
+        let from = last + self.retry_same_after_days;
+        (from > self.today).then(|| date::format(from))
+    }
+
+    /// `attr` as the nixpkgs at `locked` builds it for `target`: through the
+    /// target's own importPinned where it has one, with its overlays when
+    /// `overlays` (falling back to none when they do not evaluate there), else
+    /// imported plainly for its system. None when it is not a derivation there.
+    fn copy(
+        &self,
+        target: &Target,
+        system: &std::cell::OnceCell<String>,
+        attr: &str,
+        locked: &serde_json::Value,
+        overlays: bool,
+    ) -> Option<Copy> {
+        let key = format!(
+            "{target}\0{attr}\0{}\0{overlays}",
+            locked["narHash"].as_str().unwrap_or_default()
+        );
+        if let Some(hit) = self.copies.borrow().get(&key) {
+            return hit.clone();
+        }
+        let json = serde_json::to_string(locked).ok()?;
+        if !resolve::is_attr_name(attr) || json.contains("''") || json.contains("${") {
+            return None;
+        }
+        let via = |with: bool| {
+            self.nix
+                .eval_apply(
+                    &target.nixheal_config(),
+                    &format!(
+                        "c: if !(c ? importPinned) then {{ none = true; }} else let p = c.importPinned {{ locked = builtins.fromJSON ''{json}''; overlays = {with}; }}; in {}",
+                        resolve::copy_expr(attr)
+                    ),
+                )
+                .ok()
+        };
+        let value = match via(overlays) {
+            Some(v) if v.get("none").is_some() => {
+                let system = system.get_or_init(|| {
+                    self.nix
+                        .eval_raw(&target.system_attr())
+                        .unwrap_or_else(|_| self.system.clone())
+                });
+                resolve::copy_at(locked, system, attr)
+                    .ok()
+                    .flatten()
+                    .map(|v| (v, None))
+            }
+            Some(v) if !v.is_null() => Some((v, Some(overlays))),
+            _ if overlays => via(false)
+                .filter(|v| !v.is_null() && v.get("none").is_none())
+                .map(|v| (v, Some(false))),
+            _ => None,
+        };
+        let copy = value.and_then(|(v, overlays)| {
+            Some(Copy {
+                drv: v["drv"].as_str()?.to_string(),
+                out: v["out"].as_str()?.to_string(),
+                version: v["version"].as_str()?.to_string(),
+                overlays,
+            })
+        });
+        self.copies.borrow_mut().insert(key, copy.clone());
+        copy
+    }
+
+    /// The donor with the highest version of `attr` that is newer than the
+    /// copy at `locked` and already built or in a substituter, as (donor,
+    /// its locked input, its copy, the version it replaces). Never the drv
+    /// that failed.
+    fn donor(
+        &self,
+        st: &State,
+        attr: &str,
+        locked: &serde_json::Value,
+        overlays: bool,
+        failed: Option<&str>,
+    ) -> Option<(String, serde_json::Value, Copy, String)> {
+        if self.donors.is_empty() {
+            return None;
+        }
+        let current = self.copy(&st.target, &st.system, attr, locked, overlays)?;
+        if current.version.is_empty() {
+            return None;
+        }
+        let mut best: Option<(String, serde_json::Value, Copy)> = None;
+        for donor in &self.donors {
+            let Some(donor_locked) = self.new_lock.locked(donor) else {
+                continue;
+            };
+            if donor_locked["narHash"] == locked["narHash"] {
+                continue;
+            }
+            let Some(copy) = self.copy(&st.target, &st.system, attr, &donor_locked, overlays)
+            else {
+                continue;
+            };
+            let newer = resolve::compare_versions(&copy.version, &current.version)
+                == std::cmp::Ordering::Greater;
+            let better = best.as_ref().is_none_or(|(_, _, b)| {
+                resolve::compare_versions(&copy.version, &b.version) == std::cmp::Ordering::Greater
+            });
+            if newer
+                && better
+                && Some(copy.drv.as_str()) != failed
+                && crate::nix::available(&copy.out)
+            {
+                best = Some((donor.clone(), donor_locked, copy));
+            }
+        }
+        best.map(|(d, l, c)| (d, l, c, current.version))
+    }
+
+    /// Move the target's build pins that a donor has a newer, already built
+    /// version of to that donor.
+    fn upgrade(&self, st: &mut State) {
+        let candidates: Vec<(String, String, Pin)> = st
+            .entry
+            .iter()
+            .filter(|(_, _, p)| p.reason == Reason::Build && p.leaf)
+            .map(|(i, a, p)| (i.to_string(), a.to_string(), p.clone()))
+            .collect();
+        for (input, attr, pin) in candidates {
+            let pin = self.with_donor(st, &input, &attr, pin, true);
+            st.entry.insert(&input, &attr, pin);
+        }
     }
 
     /// Check that the target applies the pins nixheal writes for it, and return
@@ -546,6 +759,8 @@ impl Engine {
                         members: inputs.into_iter().map(|i| (i, attr.clone())).collect(),
                         reason: Reason::Eval,
                         failed_drv: None,
+                        root_drv: None,
+                        leaf: false,
                         cause: format!("evaluation failed: {}", error.clone().unwrap_or_default()),
                         trail: Vec::new(),
                         error: error.clone(),
@@ -681,6 +896,8 @@ impl Engine {
                         members,
                         reason: Reason::Build,
                         failed_drv: Some(drv.to_string()),
+                        root_drv: Some(root.to_string()),
+                        leaf: dependents == 0,
                         cause: format!("{} failed to build", graph.display_name(drv)),
                         trail: graph.trail(drv, root, closure),
                         error: None,
@@ -767,6 +984,20 @@ impl Engine {
             let mut kept: Vec<String> = Vec::new();
             let mut added: Vec<(String, String, Pin)> = Vec::new();
             for (input, attr) in &w.members {
+                if let Some(previous) = st.upgrading.remove(&(input.clone(), attr.clone())) {
+                    log::change(&format!(
+                        "{}: {attr} ({input}) fails from {}, so it goes back to {}",
+                        st.target,
+                        st.entry
+                            .get(input, attr)
+                            .and_then(|p| p.donor.clone())
+                            .unwrap_or_else(|| "its donor".into()),
+                        describe_dated(&previous.locked)
+                    ));
+                    kept.push(format!("{input} (since {})", previous.since));
+                    st.entry.insert(input, attr, previous);
+                    continue;
+                }
                 if st.entry.get(input, attr).is_some() {
                     skipped.push((
                         attr.clone(),
@@ -790,7 +1021,13 @@ impl Engine {
                         pin.trail = w.trail.clone();
                         pin.error = w.error.clone();
                     }
+                    if w.root_drv.is_some() {
+                        pin.root_drv = w.root_drv.clone();
+                        pin.leaf = w.leaf;
+                        pin.tried = Some(date::format(self.today));
+                    }
                     kept.push(format!("{input} (since {})", pin.since));
+                    let pin = self.with_donor(st, input, attr, pin, true);
                     st.entry.insert(input, attr, pin);
                     continue;
                 }
@@ -809,6 +1046,10 @@ impl Engine {
                     pin.failed_drv = w.failed_drv.clone();
                     pin.trail = w.trail.clone();
                     pin.error = w.error.clone();
+                    pin.root_drv = w.root_drv.clone();
+                    pin.leaf = w.leaf;
+                    pin.tried = None;
+                    let pin = self.with_donor(st, input, attr, pin, false);
                     added.push((input.clone(), attr.clone(), pin));
                     continue;
                 }
@@ -832,20 +1073,22 @@ impl Engine {
                     continue;
                 }
                 let overlays = choose_overlays(&self.nix, &st.target, input, attr, &locked);
-                added.push((
-                    input.clone(),
-                    attr.clone(),
-                    Pin {
-                        locked,
-                        since: date::format(self.today),
-                        reason: w.reason,
-                        failed_drv: w.failed_drv.clone(),
-                        trail: w.trail.clone(),
-                        error: w.error.clone(),
-                        overlays,
-                        checked_nar_hash: checked,
-                    },
-                ));
+                let pin = Pin {
+                    locked,
+                    since: date::format(self.today),
+                    reason: w.reason,
+                    failed_drv: w.failed_drv.clone(),
+                    trail: w.trail.clone(),
+                    error: w.error.clone(),
+                    overlays,
+                    checked_nar_hash: checked,
+                    root_drv: w.root_drv.clone(),
+                    tried: None,
+                    donor: None,
+                    leaf: w.leaf,
+                };
+                let pin = self.with_donor(st, input, attr, pin, false);
+                added.push((input.clone(), attr.clone(), pin));
             }
             if added.is_empty() && kept.is_empty() {
                 return Err(skipped
@@ -907,6 +1150,50 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// `pin`, or the same pin moved to a donor that has a newer, already
+    /// built version of the package; the pin it replaces is kept to go back
+    /// to if the donor's copy fails. `announce` logs the move as a change of
+    /// its own, for a pin that is otherwise kept as it was.
+    fn with_donor(&self, st: &mut State, input: &str, attr: &str, pin: Pin, announce: bool) -> Pin {
+        if pin.reason != Reason::Build || !pin.leaf {
+            return pin;
+        }
+        let Some((donor, locked, copy, was)) = self.donor(
+            st,
+            attr,
+            &pin.locked,
+            pin.overlays.unwrap_or(false),
+            pin.root_drv.as_deref(),
+        ) else {
+            return pin;
+        };
+        let why = format!(
+            "{donor} at {}: it has {attr} {} already built, newer than {was}",
+            describe_dated(&locked),
+            copy.version
+        );
+        if announce {
+            log::change(&format!(
+                "moved pin {}: {attr} ({input}) to {why}",
+                st.target
+            ));
+        } else {
+            log::info(&format!(
+                "{}: {attr} ({input}) is pinned to {why}",
+                st.target
+            ));
+        }
+        let mut moved = pin.clone();
+        moved.locked = locked;
+        moved.donor = Some(donor);
+        if copy.overlays.is_some() {
+            moved.overlays = copy.overlays;
+        }
+        st.upgrading
+            .insert((input.to_string(), attr.to_string()), pin);
+        moved
     }
 
     fn finish(&self, original: PinsFile, states: Vec<State>) -> Result<Report> {
@@ -978,6 +1265,18 @@ impl Engine {
                                 .push(format!("pinned {target}: {attr} ({})", new.join(", ")));
                         }
                         self.log_age(&target, attr, pins[0].1);
+                    }
+                    for (input, attr) in st.upgrading.keys() {
+                        if let Some(pin) = st.entry.get(input, attr)
+                            && let Some(donor) = &pin.donor
+                            && previous
+                                .and_then(|b| b.get(input, attr))
+                                .is_some_and(|b| b.locked != pin.locked)
+                        {
+                            report
+                                .changes
+                                .push(format!("moved pin {target}: {attr} ({input}) to {donor}"));
+                        }
                     }
                     report.built_pins.push((target.clone(), st.entry.clone()));
                     file.set(target.kind, &target.name, st.entry);

@@ -175,6 +175,8 @@ in
           commit
           switcher
           input
+          donors
+          retrySameDerivationAfterDays
           ;
       };
     })

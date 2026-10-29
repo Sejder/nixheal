@@ -717,6 +717,9 @@ pub fn reconcile(at: &Where, args: &BuildArgs, how: Activation) -> Result<ExitCo
         max_new_pins: args.max_new_pins,
         warn_after_days: cfg.warn_after_days,
         today: date::today(),
+        donors: cfg.donors.clone(),
+        retry_same_after_days: cfg.retry_same_derivation_after_days,
+        copies: Default::default(),
     };
     log::set_dry_run(args.dry_run);
     let report = engine.run();
@@ -998,7 +1001,10 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
                 && pin.reason != Reason::Manual;
             let revs: std::collections::BTreeSet<String> = sets
                 .iter()
-                .map(|(_, p)| engine::describe(&p.locked))
+                .map(|(_, p)| match &p.donor {
+                    Some(d) => format!("{} from {d}", engine::describe(&p.locked)),
+                    None => engine::describe(&p.locked),
+                })
                 .collect();
             rows.push(Row {
                 target: target.clone(),
@@ -1094,11 +1100,14 @@ pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
         .iter()
         .map(|(i, p)| {
             format!(
-                "{i} at {} (a revision from {})",
+                "{i} at {} (a revision from {}{})",
                 engine::describe(&p.locked),
                 p.locked["lastModified"]
                     .as_i64()
-                    .map_or("?".into(), |t| date::format(t / 86_400))
+                    .map_or("?".into(), |t| date::format(t / 86_400)),
+                p.donor
+                    .as_ref()
+                    .map_or(String::new(), |d| format!(", of donor {d}"))
             )
         })
         .collect();
@@ -1106,6 +1115,9 @@ pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
     for pin in failures {
         println!("  reason:    {}", reason_words(pin.reason));
         println!("  since:     {}", pin.since);
+        if let Some(tried) = &pin.tried {
+            println!("  tried:     {tried}");
+        }
         if let Some(error) = &pin.error {
             println!("  error:     {error}");
         }
@@ -1218,6 +1230,10 @@ pub fn pin(
             error: None,
             overlays,
             checked_nar_hash: checked,
+            root_drv: None,
+            tried: None,
+            donor: None,
+            leaf: false,
         },
     );
     file.save(&pins_path)?;

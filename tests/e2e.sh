@@ -18,6 +18,7 @@ system="$(nix eval --raw --impure --expr builtins.currentSystem)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 toy="$work/toypkgs"
+donor="$work/donorpkgs"
 sys="$work/system"
 log="$work/log"
 calls="$work/nh.calls"
@@ -181,12 +182,22 @@ in
 fix (builtins.foldl' extend base overlays)
 EOF
 
+mkdir -p "$donor"
+git -C "$donor" init -q -b main
+cp "$toy/default.nix" "$donor/"
+cat >"$donor/state.nix" <<EOF
+{ libfoo = "ok"; goneRemoved = false; hello = "90"; linux = "ok"; moduleError = false; extra = "ok"; salt = "$salt"; }
+EOF
+git -C "$donor" add -A
+git -C "$donor" commit -qm "a donor with hello 90"
+
 cp "$repo/nix/overlay.nix" "$repo/nix/platform.nix" "$repo/nix/import-pinned.nix" "$repo/nix/marked.nix" "$sys/"
 cat >"$sys/flake.nix" <<EOF
 {
   inputs.toypkgs = { url = "git+file://$toy"; flake = false; };
   inputs.toypkgs2 = { url = "git+file://$toy"; flake = false; };
-  outputs = { self, toypkgs, toypkgs2 }:
+  inputs.toydonor = { url = "git+file://$donor"; flake = false; };
+  outputs = { self, toypkgs, toypkgs2, ... }:
     let
       system = "$system";
       mkHost = name: paths: mkHostOf "hosts" name paths { };
@@ -682,7 +693,7 @@ write_config ""
 
 step "--update with an input the flake does not have is refused"
 if nixheal_ build --update nixpkgs; then fail "--update nixpkgs should be refused"; fi
-expect_log "--update nixpkgs: not an input of flake.lock (its inputs: toypkgs, toypkgs2)"
+expect_log "--update nixpkgs: not an input of flake.lock (its inputs: toydonor, toypkgs, toypkgs2)"
 reject_log "round 1"
 
 step "merge: a missing file or one that is not a pins file is an error, and held entries come through"
@@ -734,6 +745,7 @@ expect_pins e "toypkgs2.app"
 [ -z "$(held_reason e)" ] || fail "e was held although pinning toypkgs2 fixed it: $(held_reason e)"
 
 step "two package sets: one failure is one pin group, retried together and not reported fixed while it fails"
+write_config "" '"retrySameDerivationAfterDays": 0' '"e"'
 revision fixed false 32 ok
 nixheal_ build --update || fail "the fix for e gave up"
 expect_pins e ""
@@ -991,6 +1003,68 @@ expect_log "o2: hello (toypkgs) is pinned without your overlays: with them it do
 expect_pins o2 "toypkgs.hello"
 [ "$(field o2 toypkgs hello overlays)" = "" ] || fail "the pin of hello on o2 should not carry the overlays"
 expect_built o2 "hello-71"
+git -C "$sys" checkout -q -- flake.lock pins.json
+write_config ""
+
+step "an update that leaves the failed package's drv as it was does not build it again"
+write_config "" "" '"a"'
+revision fixed false 80 ok
+nixheal_ build --update --no-commit || fail "a did not build on 80"
+revision fixed false broken ok
+nixheal_ build --update --no-commit || fail "pinning hello on a gave up"
+expect_pins a "toypkgs.hello"
+[ -n "$(field a toypkgs hello rootDrv)" ] || fail "the hello pin records no rootDrv"
+revision broken false broken ok
+nixheal_ build --update --no-commit || fail "the update that leaves hello as it was gave up"
+expect_log "host a: hello (toypkgs): toypkgs moved, but hello is still the derivation that failed, so it is not built again"
+reject_log "retrying host a: hello"
+expect_pins a "toypkgs.hello"
+
+step "with retrySameDerivationAfterDays = 0 it is retried, and the day is recorded"
+write_config "" '"retrySameDerivationAfterDays": 0' '"a"'
+revision fixed true broken ok
+nixheal_ build --update --no-commit || fail "the retry of hello gave up"
+expect_log "retrying host a: hello (toypkgs): toypkgs moved since it was pinned"
+expect_log "host a: hello still fails; keeping its pin in toypkgs"
+[ -n "$(field a toypkgs hello tried)" ] || fail "the failed retry of hello recorded no day"
+
+step "a changed drv is retried, and released when it builds"
+write_config "" "" '"a"'
+revision fixed false 81 ok
+nixheal_ build --update --no-commit || fail "the fixed hello gave up"
+expect_log "unpinned host a: hello (toypkgs): builds again"
+expect_pins a ""
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "donors: a donor's newer copy that is not built is not used"
+write_config "" '"donors": ["toydonor"]' '"a"'
+revision fixed false 82 ok
+nixheal_ build --update --no-commit || fail "a did not build on 82"
+revision fixed false broken ok
+nixheal_ build --update --no-commit || fail "pinning hello on a with a donor gave up"
+expect_pins a "toypkgs.hello"
+[ -z "$(field a toypkgs hello donor)" ] || fail "hello was pinned to a donor whose copy is not built"
+[ "$(field a toypkgs hello leaf)" = 1 ] || fail "hello, which nothing depends on, is not marked as a leaf"
+expect_built a hello-82
+
+step "donors: once the donor's copy is built, the pin moves to it"
+nix build --no-link --impure --expr "(import $donor { system = \"$system\"; }).hello" || fail "building the donor's hello failed"
+nixheal_ build --no-commit || fail "moving the hello pin to the donor gave up"
+expect_log "moved pin host a: hello (toypkgs) to toydonor at "
+[ "$(field a toypkgs hello donor)" = toydonor ] || fail "the hello pin did not move to toydonor"
+expect_built a hello-90
+nixheal_ status || fail "nixheal status failed"
+expect_log "from toydonor"
+git -C "$sys" checkout -q -- flake.lock pins.json
+
+step "donors: a new pin goes to the donor's built copy right away"
+revision fixed false 83 ok
+nixheal_ build --update --no-commit || fail "a did not build on 83"
+revision fixed false broken ok
+nixheal_ build --update --no-commit || fail "pinning hello to the donor gave up"
+expect_log "host a: hello (toypkgs) is pinned to toydonor"
+[ "$(field a toypkgs hello donor)" = toydonor ] || fail "the new hello pin is not from toydonor"
+expect_built a hello-90
 git -C "$sys" checkout -q -- flake.lock pins.json
 write_config ""
 
