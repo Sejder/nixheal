@@ -398,7 +398,7 @@ homepage-dashboard `customapi` widget:
 ```json
 {"status":"PINNED","pins":1,"pin_entries":2,"held":0,"stale":0,
  "oldest":"host laptop: open-webui, 3d","oldest_days":3,"list":"host laptop: open-webui (3d)",
- "items":[{"name":"host laptop: open-webui","label":"3d, eval","inputs":["nixpkgs","nixpkgs-unstable"],...}],
+ "items":[{"name":"host laptop: open-webui","label":"3d, evaluation failed; pinned to 0.6.30 at 718f670e8453","inputs":["nixpkgs","nixpkgs-unstable"],...}],
  "warn_after_days":14,"generated":"2026-10-30"}
 ```
 
@@ -409,7 +409,14 @@ single `OK` row when nothing is pinned; targets are named `host NAME` and
 `home NAME`, as everywhere else. `pins` counts packages, `pin_entries` the pins
 across package sets. For scripts, each row also has `target`, `target_kind`
 (`host` or `home`) and `since`, plus `inputs` and `attr` for a pin or
-`held_reason` for a hold. Ages are in local days
+`held_reason` for a hold. A pin's row says why and what it provides: `cause`
+(e.g. "cloudflared-2026.10.3 failed to build"), `failed` and `failed_version`
+(the derivation that failed), `version` (what the pin provides), `donor`,
+`rev` and `rev_date` (the revision it is pinned to), `tried`, `retry_from` (the
+day an unchanged failure is retried anyway), `error` for an evaluation failure,
+and `sets` with the same per package set; its `label` sums it up, e.g.
+"1d, cloudflared-2026.10.3 failed to build; pinned to 2026.10.3 from nixpkgs-stable".
+Ages are in local days
 and computed when it runs, so regenerate it regularly. The text `status` marks
 the same pins and holds `STALE`.
 
@@ -418,7 +425,7 @@ The text `nixheal status`:
 ```
 flake /home/alice/nixos
 TARGET       PACKAGE (SETS)                          REASON           SINCE
-host laptop  open-webui (nixpkgs, nixpkgs-unstable)  failed to build  2026-10-20 (8d)  at 718f670e8453
+host laptop  open-webui (nixpkgs, nixpkgs-unstable)  evaluation failed  2026-10-20 (8d)  0.6.30 at 718f670e8453
 host server  -                                       whole host held  2026-10-01 (27d) STALE
     nixpkgs.linux fails and is on the never-pin list (...)
 1 pinned package, 1 held, 1 stale (older than 14 days).

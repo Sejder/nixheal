@@ -75,6 +75,9 @@ pub struct Pin {
     /// a donor's copy may replace it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub leaf: bool,
+    /// The version of the package the pin provides, for status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl Pin {
@@ -375,6 +378,7 @@ mod tests {
             tried: None,
             donor: None,
             leaf: false,
+            version: None,
         }
     }
 

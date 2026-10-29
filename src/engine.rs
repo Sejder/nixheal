@@ -353,6 +353,16 @@ impl Engine {
         };
         if st.status == Status::Active {
             self.upgrade(&mut st);
+            let unversioned: Vec<(String, String, Pin)> = st
+                .entry
+                .iter()
+                .filter(|(_, _, p)| p.version.is_none())
+                .map(|(i, a, p)| (i.to_string(), a.to_string(), p.clone()))
+                .collect();
+            for (input, attr, pin) in unversioned {
+                let pin = self.versioned(&st, &attr, pin);
+                st.entry.insert(&input, &attr, pin);
+            }
         }
         Ok(st)
     }
@@ -503,6 +513,24 @@ impl Engine {
             }
         }
         best.map(|(d, l, c)| (d, l, c, current.version))
+    }
+
+    /// `pin` with the version of the package it provides filled in, when
+    /// nixheal can evaluate it.
+    fn versioned(&self, st: &State, attr: &str, mut pin: Pin) -> Pin {
+        if pin.version.is_none() {
+            pin.version = self
+                .copy(
+                    &st.target,
+                    &st.system,
+                    attr,
+                    &pin.locked,
+                    pin.overlays.unwrap_or(false),
+                )
+                .map(|c| c.version)
+                .filter(|v| !v.is_empty());
+        }
+        pin
     }
 
     /// Move the target's build pins that a donor has a newer, already built
@@ -1028,6 +1056,7 @@ impl Engine {
                     }
                     kept.push(format!("{input} (since {})", pin.since));
                     let pin = self.with_donor(st, input, attr, pin, true);
+                    let pin = self.versioned(st, attr, pin);
                     st.entry.insert(input, attr, pin);
                     continue;
                 }
@@ -1050,6 +1079,7 @@ impl Engine {
                     pin.leaf = w.leaf;
                     pin.tried = None;
                     let pin = self.with_donor(st, input, attr, pin, false);
+                    let pin = self.versioned(st, attr, pin);
                     added.push((input.clone(), attr.clone(), pin));
                     continue;
                 }
@@ -1086,8 +1116,10 @@ impl Engine {
                     tried: None,
                     donor: None,
                     leaf: w.leaf,
+                    version: None,
                 };
                 let pin = self.with_donor(st, input, attr, pin, false);
+                let pin = self.versioned(st, attr, pin);
                 added.push((input.clone(), attr.clone(), pin));
             }
             if added.is_empty() && kept.is_empty() {
@@ -1188,6 +1220,7 @@ impl Engine {
         let mut moved = pin.clone();
         moved.locked = locked;
         moved.donor = Some(donor);
+        moved.version = Some(copy.version).filter(|v| !v.is_empty());
         if copy.overlays.is_some() {
             moved.overlays = copy.overlays;
         }

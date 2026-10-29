@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- `status --json` says why each package is pinned and what the pin provides:
+  `cause`, `failed`, `failed_version`, `version`, `donor`, `rev`, `rev_date`,
+  `tried`, `retry_from`, `error` and per-set `sets`, and the row's `label`
+  sums it up ("1d, cloudflared-2026.10.3 failed to build; pinned to 2026.10.3 from
+  nixpkgs-stable") instead of only the age and kind. The text `status` shows
+  the cause and the pinned version, and `why` the version and when an
+  unchanged failure is retried.
+- Pins record the version they provide (`"version"` in `pins.json`); existing
+  pins get it on the next build.
+- The closing line of a run counts pins moved to a donor instead of saying
+  nothing was pinned or unpinned.
+
 ## 0.1.4
 
 Retries that cannot help are skipped, and pins can move forward to a donor:

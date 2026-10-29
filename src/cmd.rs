@@ -559,6 +559,7 @@ fn tally(changes: &[String]) -> String {
         ("unpinned ", "unpinned"),
         ("held ", "held"),
         ("released ", "released"),
+        ("moved pin ", "moved to a donor"),
     ] {
         let n = count(prefix);
         if n > 0 {
@@ -948,7 +949,11 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
     let today = date::today();
     let warn = ctx.config.as_ref().map_or(14, |c| c.warn_after_days);
     if json {
-        println!("{}", crate::summary::summary(&file, today, warn));
+        let retry = ctx
+            .config
+            .as_ref()
+            .map_or(7, |c| c.retry_same_derivation_after_days);
+        println!("{}", crate::summary::summary(&file, today, warn, retry));
         return Ok(ExitCode::SUCCESS);
     }
     println!("flake {}", ctx.flake.display());
@@ -1001,9 +1006,17 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
                 && pin.reason != Reason::Manual;
             let revs: std::collections::BTreeSet<String> = sets
                 .iter()
-                .map(|(_, p)| match &p.donor {
-                    Some(d) => format!("{} from {d}", engine::describe(&p.locked)),
-                    None => engine::describe(&p.locked),
+                .map(|(_, p)| {
+                    let version = p
+                        .version
+                        .as_ref()
+                        .map_or(String::new(), |v| format!("{v} "));
+                    match &p.donor {
+                        Some(d) => {
+                            format!("{version}from {d} at {}", engine::describe(&p.locked))
+                        }
+                        None => format!("{version}at {}", engine::describe(&p.locked)),
+                    }
                 })
                 .collect();
             rows.push(Row {
@@ -1011,11 +1024,11 @@ pub fn status(at: &Where, json: bool) -> Result<ExitCode> {
                 what: format!("{attr} ({})", inputs.join(", ")),
                 reason: format!(
                     "{}{}",
-                    reason_words(pin.reason),
+                    crate::summary::cause(pin),
                     if queued { ", retry queued" } else { "" }
                 ),
                 since: format!(
-                    "{}  at {}",
+                    "{}  {}",
                     since(&pin.since, pin.reason == Reason::Manual),
                     revs.into_iter().collect::<Vec<_>>().join(", ")
                 ),
@@ -1100,14 +1113,17 @@ pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
         .iter()
         .map(|(i, p)| {
             format!(
-                "{i} at {} (a revision from {}{})",
+                "{i} at {} (a revision from {}{}){}",
                 engine::describe(&p.locked),
                 p.locked["lastModified"]
                     .as_i64()
                     .map_or("?".into(), |t| date::format(t / 86_400)),
                 p.donor
                     .as_ref()
-                    .map_or(String::new(), |d| format!(", of donor {d}"))
+                    .map_or(String::new(), |d| format!(", of donor {d}")),
+                p.version
+                    .as_ref()
+                    .map_or(String::new(), |v| format!(", version {v}"))
             )
         })
         .collect();
@@ -1117,6 +1133,20 @@ pub fn why(at: &Where, pick: &Pick, attr: &str) -> Result<ExitCode> {
         println!("  since:     {}", pin.since);
         if let Some(tried) = &pin.tried {
             println!("  tried:     {tried}");
+        }
+        let retry = ctx
+            .config
+            .as_ref()
+            .map_or(7, |c| c.retry_same_derivation_after_days);
+        if pin.reason == Reason::Build
+            && pin.root_drv.is_some()
+            && retry > 0
+            && let Some(last) = date::parse(pin.tried.as_deref().unwrap_or(&pin.since))
+        {
+            println!(
+                "  retried:   once its derivation changes, or from {}",
+                date::format(last + retry)
+            );
         }
         if let Some(error) = &pin.error {
             println!("  error:     {error}");
@@ -1234,6 +1264,7 @@ pub fn pin(
             tried: None,
             donor: None,
             leaf: false,
+            version: None,
         },
     );
     file.save(&pins_path)?;

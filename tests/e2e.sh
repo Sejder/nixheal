@@ -1054,7 +1054,18 @@ expect_log "moved pin host a: hello (toypkgs) to toydonor at "
 [ "$(field a toypkgs hello donor)" = toydonor ] || fail "the hello pin did not move to toydonor"
 expect_built a hello-90
 nixheal_ status || fail "nixheal status failed"
-expect_log "from toydonor"
+expect_log "hello-broken failed to build"
+expect_log "90 from toydonor at "
+"$nixheal" status --json --config "$config" >"$work/status.json" 2>/dev/null || fail "nixheal status --json failed"
+status_field() { nix eval --raw --impure --expr "let r = builtins.head (builtins.filter (i: i.attr or \"\" == \"hello\") (builtins.fromJSON (builtins.readFile $work/status.json)).items); in toString (r.$1 or \"\")"; }
+[ "$(status_field label)" = "today, hello-broken failed to build; pinned to 90 from toydonor" ] || fail "status --json label for hello: $(status_field label)"
+[ "$(status_field version)" = 90 ] || fail "status --json gives hello's version as $(status_field version)"
+[ "$(status_field donor)" = toydonor ] || fail "status --json gives hello's donor as $(status_field donor)"
+[ "$(status_field failed)" = hello-broken ] || fail "status --json gives what failed as $(status_field failed)"
+[ -n "$(status_field retry_from)" ] || fail "status --json has no retry_from for hello"
+nixheal_ why hello || fail "nixheal why hello failed"
+expect_log ", of donor toydonor), version 90"
+expect_log "retried:   once its derivation changes, or from "
 git -C "$sys" checkout -q -- flake.lock pins.json
 
 step "donors: a new pin goes to the donor's built copy right away"
