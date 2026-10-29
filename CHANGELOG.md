@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
 
 Retries that cannot help are skipped, and pins can move forward to a donor:
 
